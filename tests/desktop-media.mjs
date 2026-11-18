@@ -164,6 +164,8 @@ try {
   imageBase64 = await application.evaluate(async ({ clipboard, nativeImage, ClipboardItem }) => {
     globalThis.__mediaClipboard = [];
     for (const item of await clipboard.read()) {
+      // Empty Windows runner clipboards can contain a placeholder without MIME types.
+      if (!item.types.length) continue;
       const data = {};
       for (const type of item.types) data[type] = await item.getType(type);
       globalThis.__mediaClipboard.push(new ClipboardItem(data));
@@ -177,8 +179,11 @@ try {
       pixels[offset + 3] = 255;
     }
     const image = nativeImage.createFromBitmap(pixels, { width: 96, height: 64, scaleFactor: 1 });
-    await clipboard.write([new ClipboardItem({ 'image/png': new Blob([image.toPNG()], { type: 'image/png' }) })]);
-    return image.toPNG().toString('base64');
+    const png = image.toPNG();
+    if (image.isEmpty() || !png.length) throw new Error('Clipboard fixture PNG must not be empty');
+    await clipboard.write([new ClipboardItem({ 'image/png': new Blob([png], { type: 'image/png' }) })]);
+    if (!(await clipboard.has('image/png'))) throw new Error('Clipboard fixture PNG was not written');
+    return png.toString('base64');
   });
   await composer.focus();
   await composer.press('Control+V');
