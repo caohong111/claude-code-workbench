@@ -1,0 +1,23 @@
+.chat-image-button { display: inline-flex; max-width: 100%; padding: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); vertical-align: middle; cursor: zoom-in; }
+.chat-image-button img { display: block; max-width: min(100%, 640px); max-height: 420px; object-fit: contain; }
+.chat-attachment { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 5px; max-width: 100%; }
+.chat-attachment-image img { width: auto; max-width: 180px; max-height: 140px; }
+.chat-file-attachment { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 6px 9px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-muted); font-size: 12px; }
+.chat-file-attachment span { overflow-wrap: anywhere; }
+.chat-image-fallback { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); font-size: 12px; }
+.chat-image-fallback > svg { flex-shrink: 0; }
+.chat-inline-link { padding: 0; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; font-size: inherit; }
+.chat-asset-error { color: var(--error); font-size: 12px; padding: 8px 12px; margin: 0; overflow-wrap: anywhere; }
+.chat-asset-backdrop { z-index: 80; }
+.chat-asset-preview { width: min(1040px, 100%); max-height: calc(100dvh - 48px); }
+.chat-asset-preview .modal-header h2 { font-size: 14px; overflow-wrap: anywhere; min-width: 0; }
+.chat-asset-tools { display: flex; gap: 5px; flex-shrink: 0; }
+.chat-asset-image-stage { padding: 16px; min-height: 100px; overflow: auto; display: flex; align-items: center; justify-content: center; background-color: var(--code-surface); }
+.chat-asset-image-stage img { display: block; max-width: 100%; max-height: calc(100dvh - 170px); object-fit: contain; }
+@media (max-width: 600px) {
+  .chat-image-fallback { flex-wrap: wrap; }
+  .chat-asset-preview { max-height: calc(100dvh - 26px); }
+  .chat-asset-preview .modal-header { gap: 8px; padding: 12px; }
+  .chat-asset-tools { gap: 1px; }
+  .chat-asset-image-stage { padding: 8px; }
+}

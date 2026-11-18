@@ -1,0 +1,18 @@
+[
+  { "value": "tech-dark", "name": "极夜青", "group": "基础主题", "scheme": "dark", "surface": "#0d1114", "swatches": ["#0d1114", "#193039", "#67d5df"] },
+  { "value": "graphite", "name": "石墨黑", "group": "基础主题", "scheme": "dark", "surface": "#101010", "swatches": ["#101010", "#333333", "#eeeeee"] },
+  { "value": "emerald", "name": "翡翠绿", "group": "基础主题", "scheme": "dark", "surface": "#101210", "swatches": ["#101210", "#193629", "#54d99a"] },
+  { "value": "light", "name": "极简白", "group": "基础主题", "scheme": "light", "surface": "#ffffff", "swatches": ["#ffffff", "#dce3e8", "#077491"] },
+  { "value": "mist-cream", "name": "雾霾蓝与奶油", "group": "通用配色", "scheme": "light", "surface": "#F4EDE4", "swatches": ["#F4EDE4", "#D9C5B2", "#A9B8C6", "#6B7F94", "#2F3E4E"] },
+  { "value": "forest-moss", "name": "森林与苔藓", "group": "通用配色", "scheme": "light", "surface": "#F2EFE6", "swatches": ["#F2EFE6", "#C9D3B5", "#8FA67A", "#4F6B4A", "#24372B"] },
+  { "value": "sunset-terracotta", "name": "日落陶土", "group": "通用配色", "scheme": "light", "surface": "#FBEFE2", "swatches": ["#FBEFE2", "#F2B991", "#DE7A55", "#A8452F", "#4A2420"] },
+  { "value": "lavender-night", "name": "薰衣草夜", "group": "通用配色", "scheme": "light", "surface": "#F5F0FA", "swatches": ["#F5F0FA", "#D7C8EE", "#A790D6", "#6A4FB0", "#2E2255"] },
+  { "value": "sea-salt-mint", "name": "海盐薄荷", "group": "通用配色", "scheme": "light", "surface": "#EAF7F3", "swatches": ["#EAF7F3", "#BFE6DB", "#7CCBB8", "#2F9A87", "#123D3B"] },
+  { "value": "black-gold", "name": "黑金质感", "group": "通用配色", "scheme": "dark", "surface": "#1C1C1E", "swatches": ["#1C1C1E", "#3A3A3C", "#B8985A", "#E8DCC0", "#F7F3EA"] },
+  { "value": "sakura-milk-tea", "name": "樱花奶茶", "group": "粉色系", "scheme": "light", "surface": "#FFF1F2", "swatches": ["#FFF1F2", "#FBD3D9", "#E8A5B3", "#B76E7F", "#5B3A44"] },
+  { "value": "dusty-pink-sage", "name": "脏粉与鼠尾草绿", "group": "粉色系", "scheme": "light", "surface": "#F7E9E6", "swatches": ["#F7E9E6", "#E3B5B0", "#C98B8B", "#9CAF9A", "#4C5E52"] },
+  { "value": "peach-coral", "name": "蜜桃珊瑚", "group": "粉色系", "scheme": "light", "surface": "#FFF0E8", "swatches": ["#FFF0E8", "#FFC9B5", "#FF9E8A", "#E0605E", "#7A2E3A"] },
+  { "value": "rose-berry", "name": "玫瑰莓果", "group": "粉色系", "scheme": "light", "surface": "#FCEAF1", "swatches": ["#FCEAF1", "#F4B6CF", "#D9608F", "#A32A5E", "#4A1230"] },
+  { "value": "pink-blue-macaron", "name": "粉蓝马卡龙", "group": "粉色系", "scheme": "light", "surface": "#FDEBF1", "swatches": ["#FDEBF1", "#F9C6D8", "#C9E3F3", "#8FC1E3", "#3E6F9E"] },
+  { "value": "hot-pink-black", "name": "亮粉配黑", "group": "粉色系", "scheme": "light", "surface": "#FFF0F7", "swatches": ["#FFF0F7", "#FF9ECB", "#F0449A", "#B3166E", "#1F1A1D"] }
+]

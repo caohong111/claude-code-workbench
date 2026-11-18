@@ -1,0 +1,78 @@
+{
+  "name": "claude-code-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An independent visual desktop workbench for Claude Code and compatible API providers",
+  "license": "MIT",
+  "author": "Claude Code Workbench contributors",
+  "homepage": "https://github.com/caohong111/claude-code-workbench",
+  "repository": { "type": "git", "url": "https://github.com/caohong111/claude-code-workbench.git" },
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "postinstall": "node tools/ensure-runtime.mjs",
+    "runtime:install": "node tools/ensure-runtime.mjs",
+    "dev": "vite --host 127.0.0.1 --port 4317 --strictPort",
+    "build": "vite build",
+    "start": "electron .",
+    "test": "node --test tests/*.test.mjs",
+    "test:desktop": "node tests/desktop-smoke.mjs",
+    "test:direct": "node tests/desktop-direct.mjs",
+    "test:media": "node tests/desktop-media.mjs",
+    "test:themes": "node tests/desktop-themes.mjs",
+    "test:package": "node tests/packaged-smoke.mjs",
+    "audit:release": "node tools/audit-release.mjs",
+    "audit:deps": "npm audit --omit=dev",
+    "assets:generate": "node tools/generate-default-assets.mjs",
+    "licenses:collect": "node tools/collect-licenses.mjs",
+    "pack:win": "npm run audit:release && npm run build && npm run licenses:collect && electron-builder --win --x64 --dir --publish never",
+    "dist:win": "npm run audit:release && npm run build && npm run licenses:collect && electron-builder --win nsis --x64 --publish never"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.326",
+    "diff": "^8.0.2",
+    "eventsource-parser": "^3.1.1",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "smol-toml": "^1.9.1",
+    "glob": "^14.0.6",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "electron": "45.3.3",
+    "vite": "^7.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "engines": { "node": ">=22.12.0" },
+  "build": {
+    "appId": "io.github.claude-code-workbench",
+    "productName": "Claude Code Workbench",
+    "electronDist": "node_modules/electron/dist",
+    "directories": { "output": "release", "buildResources": "build" },
+    "files": [
+      "dist/**/*", "electron/**/*", "shared/**/*", "assets/**/*", "themes.json", "package.json",
+      "LICENSE", "THIRD_PARTY_NOTICES.md",
+      "!**/*.map", "!**/tests/**", "!**/.env*", "!**/data/**", "!**/local-data/**"
+    ],
+    "asarUnpack": ["node_modules/@anthropic-ai/claude-agent-sdk-*/**/*"],
+    "extraResources": [
+      { "from": "build/third-party-licenses", "to": "licenses" },
+      { "from": "assets/app-icon.ico", "to": "app-icon.ico" }
+    ],
+    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }], "icon": "assets/app-icon.ico", "signAndEditExecutable": true },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "Claude-Code-Workbench-Setup-${version}-${arch}.${ext}"
+    }
+  }
+}

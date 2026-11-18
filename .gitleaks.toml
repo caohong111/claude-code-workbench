@@ -1,0 +1,14 @@
+title = "Claude Code Workbench secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Explicit synthetic test credentials only"
+regexTarget = "secret"
+regexes = [
+  '''^fixture-[A-Za-z0-9_-]+$''',
+  '''^sk-fixture-[A-Za-z0-9_-]+$''',
+  '''^test-[A-Za-z0-9_-]+$''',
+  '''^fake-[A-Za-z0-9_-]+$'''
+]
