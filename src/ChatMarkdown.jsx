@@ -10,7 +10,7 @@ function ToolButton({ icon: Icon, label, ...props }) {
   return <button type="button" className="icon-button" title={label} aria-label={label} {...props}><Icon size={17} aria-hidden="true" /></button>;
 }
 
-function CopyableCode({ children }) {
+function CopyableCode({ children, api }) {
   const contentRef = useRef(null);
   const timer = useRef(null);
   const [copied, setCopied] = useState(false);
@@ -18,7 +18,8 @@ function CopyableCode({ children }) {
   useEffect(() => () => clearTimeout(timer.current), []);
   async function copy() {
     try {
-      await navigator.clipboard.writeText(contentRef.current?.textContent || '');
+      await api.copyText(contentRef.current?.textContent || '');
+      clearTimeout(timer.current);
       setCopied(true); setError('');
       timer.current = setTimeout(() => setCopied(false), 1600);
     } catch { setError('复制失败，请重试。'); }
@@ -113,7 +114,7 @@ export default function ChatMarkdown({ text, api = window.claudePanel }) {
   }
   const onError = (error) => setError(error.message || '文件操作失败。');
   return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkWindowsFileLinks]} urlTransform={chatUrlTransform} components={{
-    pre: ({ children }) => <CopyableCode>{children}</CopyableCode>,
+    pre: ({ children }) => <CopyableCode api={api}>{children}</CopyableCode>,
     a: ({ children, href }) => {
       const kind = classifyChatHref(href);
       if (kind === 'local') return <a href={href} aria-busy={loadingHref === href} onClick={(event) => { event.preventDefault(); const label = linkText(children); if (/下载|download/i.test(label) && !/打开|查看|open|view/i.test(label)) downloadLocal(href); else openLocal(href); }}>{children}</a>;

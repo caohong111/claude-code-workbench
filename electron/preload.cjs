@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('claudePanel', {
   pickAttachments: invoke('attachments'),
   chooseAttachments: invoke('attachments'),
   pasteImage: invoke('paste-image'),
+  copyText: invoke('copy-text'),
   getChatAsset: invoke('chat-asset'),
   openChatAsset: invoke('open-chat-asset'),
   saveChatAsset: invoke('save-chat-asset'),

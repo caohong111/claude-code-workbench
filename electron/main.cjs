@@ -246,7 +246,15 @@ function handle(channel, callback) {
   });
 }
 
+async function copyText(text) {
+  if (typeof text !== 'string') throw new Error('复制内容必须是文本。');
+  if (Buffer.byteLength(text, 'utf8') > 4 * 1024 * 1024) throw new Error('复制内容不能超过 4 MB。');
+  await clipboard.writeText(text);
+  return { copied: true };
+}
+
 function registerHandlers() {
+  handle('copy-text', copyText);
   handle('state', async () => { await refreshConnection(); return snapshot(); });
   handle('connection', refreshConnection);
   handle('models', async () => { await connectionService.refresh({ forceModels: true }); return snapshot(); });
@@ -288,7 +296,7 @@ function registerHandlers() {
       if (!Number.isInteger(number) || number < 1) throw new Error('请选择回答序号。');
       const message = session?.messages.filter(item => item.role === 'assistant' && item.text).at(-number);
       if (!message) throw new Error('没有对应的回答。');
-      await clipboard.writeText(message.text); return { type: 'text', content: '回答已复制。' };
+      await copyText(message.text); return { type: 'text', content: '回答已复制。' };
     }
     if (command.id === 'export') {
       if (!session) throw new Error('请选择对话。');

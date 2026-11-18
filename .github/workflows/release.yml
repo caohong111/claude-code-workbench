@@ -25,6 +25,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - run: node tools/audit-release.mjs --artifact release/win-unpacked
       - run: npm run test:package
+      - run: node tests/desktop-clipboard.mjs release/win-unpacked
       - name: Checksums
         shell: pwsh
         run: |

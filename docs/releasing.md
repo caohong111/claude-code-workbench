@@ -21,6 +21,7 @@ npm test
 npm run build
 npm run test:desktop
 npm run test:direct
+npm run test:clipboard
 npm run test:media
 npm run test:themes
 npm run pack:win
@@ -28,6 +29,7 @@ node tools/audit-release.mjs --artifact .\release\win-unpacked
 npm run dist:win
 node tools/audit-release.mjs --artifact .\release\win-unpacked
 npm run test:package
+node tests/desktop-clipboard.mjs .\release\win-unpacked
 ```
 
 第一条制品检查会扫描解包应用的 `resources/app.asar` 及额外资源，第二次确认最终打包阶段仍未混入本机数据。发布文件只应从 `release` 中挑选构建产物，不要把整个开发目录压缩上传。
