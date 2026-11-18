@@ -48,10 +48,13 @@ async function appearancePage() {
 async function chooseTheme(theme) {
   const radio = page.locator(`[data-theme-value="${theme.value}"]`);
   await expect(radio).toBeEnabled();
-  await radio.check();
+  // The controlled radio updates after the preferences IPC has persisted its value.
+  await radio.click();
+  await expect(radio).toBeChecked();
   await page.waitForFunction(id => document.documentElement.dataset.theme === id, theme.value);
   await page.waitForFunction(async id => (await window.claudePanel.getState()).preferences.theme === id, theme.value);
-  await expect(radio).toBeChecked();
+  await expect.poll(async () => JSON.parse(await fs.readFile(path.join(isolated, 'state', 'workspaces.json'), 'utf8')).preferences.theme).toBe(theme.value);
+  await expect(radio).toBeEnabled();
   assert.equal(await application.evaluate(({ nativeTheme }) => nativeTheme.themeSource), theme.scheme, `${theme.name}: native theme source`);
 }
 
