@@ -76,7 +76,7 @@ test('streams text once, preserves resumed session, and reports cached usage', a
   assert.equal(fixture.state.options.resume, 'resumed-session');
   assert.equal(fixture.state.options.model, 'sonnet');
   assert.equal(fixture.state.options.effort, 'high');
-  assert.equal(fixture.state.options.permissionMode, 'manual');
+  assert.equal(fixture.state.options.permissionMode, 'default');
   assert.equal(result.sessionId, 'resumed-session');
   assert.deepEqual(fixture.events.find((event) => event.type === 'usage').usage, {
     inputTokens: 10, outputTokens: 7, costUsd: 0.001, durationMs: 123,
@@ -84,6 +84,51 @@ test('streams text once, preserves resumed session, and reports cached usage', a
   assert.equal(fixture.events.at(-1).type, 'done');
   assert.equal(fixture.service.currentRun, null);
   assert.ok(fixture.state.closes >= 1);
+});
+
+test('an incomplete native stream preserves partial text and can resume on the same service', async t => {
+  let requests = 0;
+  const fixture = await harness(t, async function* (options) {
+    requests += 1;
+    if (requests === 1) {
+      yield { type: 'system', subtype: 'init', session_id: 'interrupted-session' };
+      yield stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Saved partial reply.' } });
+      return;
+    }
+    assert.equal(options.resume, 'interrupted-session');
+    yield success('Continued reply.', { session_id: 'interrupted-session' });
+  });
+  const result = await fixture.run();
+  assert.equal(result.isError, true);
+  assert.equal(result.sessionId, 'interrupted-session');
+  assert.equal(result.result, 'Saved partial reply.');
+  assert.equal(fixture.service.currentRun, null);
+  assert.equal(fixture.events.filter(event => event.type === 'error').length, 1);
+  assert.match(fixture.events.find(event => event.type === 'error').error, /连接已中断/);
+  assert.deepEqual(fixture.events.at(-1), {
+    type: 'done', result: 'Saved partial reply.', stopped: false, isError: true,
+    sessionId: 'interrupted-session', runId: 'run-fixture',
+  });
+  const resumed = await fixture.run({ runId: 'resumed-run', resumeSessionId: result.sessionId });
+  assert.equal(resumed.isError, false);
+  assert.equal(resumed.result, 'Continued reply.');
+  assert.equal(requests, 2, 'Incomplete tasks must wait for an explicit continuation');
+  assert.equal(fixture.service.currentRun, null);
+});
+
+test('a confirmed empty native result succeeds and an error result emits only one error', async t => {
+  let requests = 0;
+  const fixture = await harness(t, async function* () {
+    requests += 1;
+    yield requests === 1 ? success('') : success('', {
+      subtype: 'error_max_turns', is_error: true, errors: ['Fixture turn limit reached.'],
+    });
+  });
+  assert.equal((await fixture.run()).isError, false);
+  assert.equal(fixture.events.filter(event => event.type === 'error').length, 0);
+  assert.equal((await fixture.run()).isError, true);
+  assert.equal(fixture.events.filter(event => event.type === 'error').length, 1);
+  assert.equal(fixture.events.at(-1).isError, true);
 });
 
 test('sends screenshot bytes as SDK image blocks while preserving text and resume', async (t) => {
@@ -100,6 +145,17 @@ test('sends screenshot bytes as SDK image blocks while preserving text and resum
   assert.equal(fixture.state.options.resume, 'existing-image-session');
   assert.equal(JSON.stringify(fixture.events).includes(image.dataBase64), false, 'Image payload must not appear in UI events');
   await assert.rejects(fixture.run({ inputImages: [{ mimeType: 'image/svg+xml', dataBase64: 'AAAA' }] }), /无效.*图片/);
+});
+
+test('workbench permission modes map to the canonical SDK modes without bypassing checks', async t => {
+  const fixture = await harness(t, async function* () { yield success(); });
+  for (const [permissionMode, sdkMode] of [['manual', 'default'], ['default', 'default'], ['acceptEdits', 'acceptEdits'], ['auto', 'auto'], ['plan', 'plan']]) {
+    await fixture.run({ permissionMode });
+    assert.equal(fixture.state.options.permissionMode, sdkMode);
+    assert.equal(fixture.state.options.permissionPrompts, 'host');
+    assert.equal(fixture.state.options.allowDangerouslySkipPermissions, undefined);
+    assert.equal(typeof fixture.state.options.canUseTool, 'function');
+  }
 });
 
 test('follow mode reloads provider settings and clears stale resumed model overrides', async (t) => {
@@ -202,7 +258,7 @@ test('routes allow, deny, and user answers through canUseTool', async (t) => {
   assert.equal(fixture.service.respondPermission({ id: 'expired', decision: 'allow' }), false);
 });
 
-for (const permissionMode of ['auto', 'manual']) {
+for (const permissionMode of ['auto', 'manual', 'acceptEdits']) {
   test(`${permissionMode}: hooks require human answers and plan approval without duplicate prompts`, async (t) => {
     const hookResults = [];
     const callbackResults = [];
@@ -310,4 +366,44 @@ test('keeps credentials on the host even when text streams across secret boundar
   assert.equal(fixture.state.options.env.CLAUDE_CONFIG_DIR, fixture.fixtureDirectory);
   assert.equal(fixture.state.options.env.TEMP, join(fixture.fixtureDirectory, 'temp'));
   assert.equal(fixture.state.options.env.DISABLE_UPDATES, '1');
+});
+
+for (const completed of [false, true]) {
+  test(`conceals trailing credential fragments when the native stream ${completed ? 'completes' : 'disconnects'}`, async t => {
+    const fragment = fakeToken.slice(0, 18);
+    const fixture = await harness(t, async function* () {
+      yield stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: `Value: ${fragment}` } });
+      if (completed) yield success(`Value: ${fragment}`);
+    });
+    const result = await fixture.run();
+    assert.equal(result.isError, !completed);
+    assert.equal(result.result, 'Value: [REDACTED]');
+    assert.equal(fixture.events.filter(event => event.type === 'text').map(event => event.text).join(''), 'Value: [REDACTED]');
+    assert.equal(fixture.events.at(-1).result, 'Value: [REDACTED]');
+    assert.equal(JSON.stringify({ events: fixture.events, result }).includes(fragment), false);
+  });
+}
+
+test('a failed trailing text notification still releases the service and attempts done', async t => {
+  let requests = 0;
+  const fixture = await harness(t, async function* () {
+    requests += 1;
+    if (requests === 1) {
+      yield stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: fakeToken.slice(0, 18) } });
+      return;
+    }
+    yield success();
+  });
+  const original = fixture.service.onEvent;
+  fixture.service.onEvent = async event => {
+    await original(event);
+    if (requests === 1 && event.type === 'text') throw new Error('Fixture notification failure.');
+  };
+  await assert.rejects(fixture.run(), /Fixture notification failure/);
+  assert.equal(fixture.service.currentRun, null);
+  assert.equal(fixture.service.pendingPermissions.size, 0);
+  assert.equal(fixture.events.at(-1).type, 'done');
+  assert.equal(fixture.events.at(-1).isError, true);
+  assert.equal((await fixture.run()).isError, false);
+  assert.equal(fixture.service.currentRun, null);
 });

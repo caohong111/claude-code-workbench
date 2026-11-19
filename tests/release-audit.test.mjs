@@ -71,7 +71,7 @@ test('credential URLs and literal personal home paths fail without printing thei
 });
 
 test('allowlist blocks credentials, private histories, original avatars and live paid tests', () => {
-  for (const file of ['data/workspace-state.json', 'local-data/manifest.json', 'cache/api.json', 'tests/.tmp/session.json', '.env', 'assets/meicon.jpg', 'tests/live-media-smoke.mjs', '../secret.txt', 'private.key', 'build/third-party-licenses/fixture-1.0.0/LICENSE']) assert.ok(pathProblem(file), file);
+  for (const file of ['data/workspace-state.json', 'local-data/manifest.json', 'cache/api.json', 'tests/.tmp/session.json', '.env', 'assets/personal-avatar.jpg', 'tests/live-media-smoke.mjs', '../secret.txt', 'private.key', 'build/third-party-licenses/fixture-1.0.0/LICENSE']) assert.ok(pathProblem(file), file);
   for (const file of ['electron/provider-config.mjs', 'src/App.jsx', 'assets/app-icon.png', 'install.ps1', '.github/workflows/release.yml', '.gitleaks.toml']) assert.equal(pathProblem(file), null, file);
 });
 

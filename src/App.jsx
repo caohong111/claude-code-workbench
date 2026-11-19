@@ -18,6 +18,16 @@ import {
 
 const EFFORT_OPTIONS = [['low', '低'], ['medium', '中等'], ['high', '高'], ['xhigh', '很高'], ['max', '最高']];
 const PERMISSION_OPTIONS = [['manual', '手动确认'], ['acceptEdits', '自动接受编辑'], ['auto', '自动判断'], ['plan', '仅做计划']];
+const CONTINUE_TASK = '请从刚才中断处继续完成当前任务。先检查已完成的文件和操作，避免重复执行，然后继续剩余工作并验证结果。';
+function permissionHint(preferences, connection) {
+  if (preferences.permissionMode === 'plan') return '只读分析；不修改文件或执行命令。';
+  if (preferences.permissionMode === 'acceptEdits') return '工作区文件读取和编辑无需重复确认；执行命令仍需确认。';
+  if (preferences.permissionMode === 'auto') {
+    const model = preferences.model === 'default' ? connection.configuredModel : preferences.model;
+    return /^(?:gpt-|o\d|codex-)/i.test(model || '') ? '直连模式自动接受工作区文件编辑；执行命令仍需确认。' : '由 Claude Code 判断操作风险；问题、计划批准和必要权限仍需确认。';
+  }
+  return '工作区读取无需确认；文件编辑和执行命令需确认。';
+}
 const DEFAULT_PREFERENCES = { model: 'default', effort: 'medium', permissionMode: 'manual', theme: 'tech-dark' };
 const SETTINGS_ROUTES = { config: 'general', settings: 'general', theme: 'appearance', permissions: 'model', effort: 'model', fast: 'model', autocompact: 'model', status: 'connection' };
 const EMPTY_STATE = {
@@ -146,9 +156,9 @@ function PreferenceFields({ preferences, connection, modelSourceId, onChange, on
         {EFFORT_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select></div>
     <div className={`control-field permission-field ${compact ? 'compact' : ''}`}><label htmlFor={compact ? 'toolbar-permission' : 'settings-permission'}>操作权限</label>
-      <select id={compact ? 'toolbar-permission' : 'settings-permission'} value={preferences.permissionMode} disabled={disabled} onChange={(event) => onChange({ permissionMode: event.target.value })}>
+      <select id={compact ? 'toolbar-permission' : 'settings-permission'} title={permissionHint(preferences, connection)} value={preferences.permissionMode} disabled={disabled} onChange={(event) => onChange({ permissionMode: event.target.value })}>
         {PERMISSION_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-      </select></div>
+      </select>{!compact && <small className="permission-hint">{permissionHint(preferences, connection)}</small>}</div>
   </>;
 }
 
@@ -370,15 +380,17 @@ function DiffPreview({ change }) {
 function ToolActivity({ tools }) {
   const [expanded, setExpanded] = useState(new Set());
   if (!tools.length) return <div className="inspector-empty"><ListChecks size={28} /><span>当前对话尚无操作记录</span></div>;
-  return <div className="activity-list">{[...tools].reverse().map((tool) => <div className="activity-item" key={tool.id}>
-    <button className="activity-heading" aria-expanded={expanded.has(tool.id)} onClick={() => setExpanded((previous) => {
-      const next = new Set(previous); if (next.has(tool.id)) next.delete(tool.id); else next.add(tool.id); return next;
+  return <div className="activity-list">{[...tools].reverse().map((tool) => {
+    const key = `${tool.runId || 'legacy'}:${tool.id}`;
+    return <div className="activity-item" key={key}>
+    <button className="activity-heading" aria-expanded={expanded.has(key)} onClick={() => setExpanded((previous) => {
+      const next = new Set(previous); if (next.has(key)) next.delete(key); else next.add(key); return next;
     })}>
       {tool.status === 'running' ? <LoaderCircle size={15} className="spin" /> : tool.status === 'error' ? <CircleAlert size={15} className="status-error" /> : <Check size={15} className="status-success" />}
-      <strong>{tool.name}</strong><time>{formatTime(tool.createdAt)}</time><ChevronDown size={13} className={expanded.has(tool.id) ? 'rotated' : ''} />
+      <strong>{tool.name}</strong><time>{formatTime(tool.createdAt)}</time><ChevronDown size={13} className={expanded.has(key) ? 'rotated' : ''} />
     </button><p className="activity-summary">{getInputSummary(tool.input)}</p>
-    {expanded.has(tool.id) && <div className="activity-detail"><pre>{JSON.stringify(tool.input, null, 2)}</pre>{tool.output && <pre>{typeof tool.output === 'string' ? tool.output : JSON.stringify(tool.output, null, 2)}</pre>}</div>}
-  </div>)}</div>;
+    {expanded.has(key) && <div className="activity-detail"><pre>{JSON.stringify(tool.input, null, 2)}</pre>{tool.output && <pre>{typeof tool.output === 'string' ? tool.output : JSON.stringify(tool.output, null, 2)}</pre>}</div>}
+  </div>; })}</div>;
 }
 
 export default function App() {
@@ -410,6 +422,7 @@ export default function App() {
   const composerRef = useRef(null);
   const composingRef = useRef(false);
   const sendingRef = useRef(false);
+  const revisionRef = useRef(-1);
   const pendingFileRef = useRef(0);
   const workspaceRef = useRef(null);
   const autoScrollRef = useRef(true);
@@ -418,6 +431,8 @@ export default function App() {
   const running = Boolean(state.run);
   const messages = state.session?.messages || [];
   const tools = state.session?.tools || [];
+  const runTools = tools.filter(tool => tool.runId === state.run?.id);
+  const runLabel = state.run?.status === 'waiting' ? '等待你的确认' : state.run?.status === 'stopping' ? '正在停止' : ({ requesting: '正在请求模型', thinking: '模型正在处理', responding: '正在接收回复', tool: `正在执行 ${state.run?.toolName || '工具'}` }[state.run?.phase] || 'Claude 正在处理');
   const changes = state.session?.changes || [];
   const usage = state.session?.usage || {};
   const workspaces = state.recentWorkspaces || state.workspaces || [];
@@ -425,7 +440,13 @@ export default function App() {
 
   const reportError = useCallback((error) => { setLocalError(error?.message || String(error)); }, []);
   const applyState = useCallback((next) => {
-    if (next && typeof next === 'object' && ('workspace' in next || 'workspaces' in next)) setState(next);
+    if (next && typeof next === 'object' && ('workspace' in next || 'workspaces' in next)) {
+      if (Number.isInteger(next.revision)) {
+        if (next.revision < revisionRef.current) return;
+        revisionRef.current = next.revision;
+      }
+      setState(next);
+    }
   }, []);
 
   useEffect(() => {
@@ -479,9 +500,14 @@ export default function App() {
     if ((!text && !attachments.length) || running || busy || sendingRef.current || !state.workspace || !api) return;
     sendingRef.current = true;
     autoScrollRef.current = true;
+    const submittedDraft = draft;
+    const submittedAttachments = new Set(attachments.map(item => item.path));
     try {
-      const result = await action('send', () => api.sendMessage({ text, ...preferences, sourceId: state.connection?.sourceId, attachments, imageGeneration: !quickPrompt && imageGeneration }));
-      if (result) { setDraft(''); setAttachments([]); }
+      const result = await action('send', () => api.sendMessage({ text, ...preferences, sourceId: state.connection?.sourceId, attachments: quickPrompt ? [] : attachments, imageGeneration: !quickPrompt && imageGeneration }));
+      if (result && !quickPrompt) {
+        setDraft(current => current === submittedDraft ? '' : current);
+        setAttachments(current => current.filter(item => !submittedAttachments.has(item.path)));
+      }
     } finally { sendingRef.current = false; }
   }
 
@@ -651,9 +677,13 @@ export default function App() {
               <strong>{message.role === 'assistant' ? 'Claude' : message.role === 'user' ? '你' : '工作台'}</strong><time>{formatTime(message.createdAt)}</time>
               {message.text && <IconButton icon={Copy} label="复制消息" onClick={() => api.copyText(message.text).then(() => setLocalError('')).catch(reportError)} />}</header>
             <div className="message-body"><ChatMarkdown text={message.text || (message.role === 'assistant' && state.run?.assistantMessageId !== message.id ? (message.error ? `本次请求失败：${message.error}` : '该次请求未返回内容。') : '')} />{message.attachments?.length > 0 && <div className="message-attachments">{message.attachments.map((item) => item.mimeType?.startsWith('image/') ? <ChatAttachment key={item.path} attachment={item} /> : <span key={item.path} title={item.path}><Paperclip size={12} />{item.name}</span>)}</div>}</div>
+            {message.role === 'assistant' && state.run?.assistantMessageId !== message.id && (message.error || message.status === 'stopped') && <div className="message-outcome" role="status" title={message.error || undefined}>
+              <CircleAlert size={14} /><span>{message.error ? '本轮已中断，已完成的内容仍保留。' : '本轮已停止。'}</span>
+              {messages.at(-1)?.id === message.id && <button type="button" disabled={running || Boolean(busy)} onClick={() => sendMessage(CONTINUE_TASK)}><RefreshCw size={13} />继续任务</button>}
+            </div>}
           </article>)}
-          {running && <div className="run-status" role="status"><LoaderCircle size={15} className="spin" /><span>{state.run.status === 'waiting' ? '等待你的确认' : state.run.status === 'stopping' ? '正在停止' : 'Claude 正在处理'}</span><time>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}</time>
-            {tools.length > 0 && <button onClick={() => { setInspectorTab('activity'); setInspectorOpen(true); }}><ListChecks size={14} />{tools.length} 项操作</button>}</div>}
+          {running && <div className="run-status" role="status"><LoaderCircle size={15} className="spin" /><span>{runLabel}</span><time>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}</time>
+            {runTools.length > 0 && <button onClick={() => { setInspectorTab('activity'); setInspectorOpen(true); }}><ListChecks size={14} />{runTools.length} 项操作</button>}</div>}
           </div>}
         </div>
 
@@ -670,7 +700,7 @@ export default function App() {
                 : <button className="send-button" type="submit" title="发送任务" aria-label="发送任务" disabled={(!draft.trim() && !attachments.length) || !state.workspace || !api || Boolean(busy)}>{busy === 'send' ? <LoaderCircle size={18} className="spin" /> : <ArrowUp size={20} />}</button>}
             </div>
           </form>
-          <div className="conversation-footer"><button className="permission-status" title="操作权限设置" aria-label="操作权限设置" disabled={!api} onClick={() => showSettings('model')}><ShieldCheck size={12} />{PERMISSION_OPTIONS.find(([value]) => value === preferences.permissionMode)?.[1] || preferences.permissionMode}</button>
+          <div className="conversation-footer"><button className="permission-status" title={permissionHint(preferences, state.connection || {})} aria-label="操作权限设置" disabled={!api} onClick={() => showSettings('model')}><ShieldCheck size={12} />{PERMISSION_OPTIONS.find(([value]) => value === preferences.permissionMode)?.[1] || preferences.permissionMode}</button>
             {(usage.inputTokens || usage.outputTokens) ? <span title="输入 / 输出 token">{formatNumber(usage.inputTokens)} / {formatNumber(usage.outputTokens)} tokens</span> : <span>{state.connection?.claudeVersion ? `Claude Code ${state.connection.claudeVersion}` : ''}</span>}
             {typeof usage.costUsd === 'number' && usage.costUsd > 0 && <span title="CLI 报告的估算费用；实际计费以供应商为准">估算 ${usage.costUsd.toFixed(4)}</span>}
           </div>

@@ -44,6 +44,7 @@ let runTask = null;
 let shuttingDown = false;
 let shutdownComplete = false;
 let errorMessage = null;
+let stateRevision = 0;
 let commandApi;
 let commandActions;
 let commandControl;
@@ -100,6 +101,7 @@ function currentWorkspace() {
 function snapshot() {
   const workspace = currentWorkspace();
   return {
+    revision: ++stateRevision,
     workspaces: store.data.workspaces,
     recentWorkspaces: store.data.workspaces,
     workspace,
@@ -208,13 +210,26 @@ async function onServiceEvent(event) {
   const assistant = session.messages.find(message => message.id === run.assistantMessageId);
   switch (event.type) {
     case 'session': if (event.engine === 'responses') session.directResponsesSessionId = event.sessionId; else session.claudeSessionId = event.sessionId; break;
-    case 'text': if (assistant) assistant.text += event.text || ''; break;
+    case 'text':
+      if (assistant) assistant.text += event.text || '';
+      run.phase = 'responding'; run.toolName = null; run.lastActivityAt = new Date().toISOString();
+      break;
     case 'tool': {
-      const item = event.tool;
-      const index = session.tools.findIndex(tool => tool.id === item.id);
+      const item = { ...event.tool, runId: run.id };
+      run.phase = item.status === 'running' ? 'tool' : 'thinking';
+      run.toolName = item.status === 'running' ? item.name : null;
+      run.lastActivityAt = new Date().toISOString();
+      const index = session.tools.findIndex(tool => tool.id === item.id && tool.runId === item.runId);
       if (index >= 0) session.tools[index] = { ...session.tools[index], ...item }; else session.tools.push(item);
       break;
     }
+    case 'progress':
+      if (['requesting', 'thinking', 'responding', 'tool'].includes(event.phase)) {
+        run.phase = event.phase;
+        run.toolName = event.toolName || null;
+        run.lastActivityAt = new Date().toISOString();
+      }
+      break;
     case 'permission': {
       if (shuttingDown || run.status === 'stopping') {
         service.respondPermission({ id: event.permission.id, decision: 'deny' });
@@ -491,6 +506,8 @@ function registerHandlers() {
     let releaseInitialization;
     sendInitializationDone = new Promise(resolve => { releaseInitialization = resolve; });
     let initializedRunId = null;
+    let initializedSession = null;
+    let initializedAssistant = null;
     try {
     const workspace = requireWorkspace(); await refreshConnection(); alignProviderSelection(true);
     const expectedProviderKey = connectionService.requestKey;
@@ -521,11 +538,13 @@ function registerHandlers() {
     const session = store.currentSession || store.createSession();
     const createdAt = new Date().toISOString();
     const user = { id: randomUUID(), role: 'user', text: request.text.trim() || '请查看这张图片。', createdAt, attachments, ...(imageGeneration ? { imageGeneration: true } : {}) };
-    const assistant = { id: randomUUID(), role: 'assistant', text: '', createdAt };
+    const assistant = { id: randomUUID(), role: 'assistant', text: '', status: 'running', createdAt };
+    initializedSession = session;
+    initializedAssistant = assistant;
     session.messages.push(user, assistant);
     if (session.title === '新对话') session.title = user.text.slice(0, 32);
     session.updatedAt = createdAt;
-    run = { id: randomUUID(), status: 'running', startedAt: createdAt, assistantMessageId: assistant.id };
+    run = { id: randomUUID(), status: 'running', phase: 'requesting', startedAt: createdAt, lastActivityAt: createdAt, assistantMessageId: assistant.id };
     initializedRunId = run.id;
     clearPermissions(); errorMessage = null;
     await store.save(); emit(true);
@@ -540,7 +559,7 @@ function registerHandlers() {
     if (switchingEngine) { if (useResponses) session.directResponsesSessionId = null; else session.claudeSessionId = null; }
     const resumeSessionId = useResponses ? session.directResponsesSessionId : session.claudeSessionId;
     if (!resumeSessionId && session.messages.length > 2) {
-      const history = session.messages.slice(0, -2).slice(-20).filter(item => item.text && !item.error && !/^(?:API Error:|Failed to authenticate)/.test(item.text)).map(item => `${item.role}: ${item.text}`).join('\n\n').slice(-40000);
+      const history = session.messages.slice(0, -2).slice(-20).filter(item => item.text && !/^(?:API Error:|Failed to authenticate|本次请求失败：|本次任务未返回文本)/.test(item.text)).map(item => `${item.role}${item.error || item.status === 'stopped' ? ' [未完成，仅包含已显示的内容]' : ''}: ${item.text}`).join('\n\n').slice(-40000);
       if (history) {
         const context = `以下是此对话之前的记录，供继续任务参考：\n${history}`;
         if (!useResponses && /^\/[\w:-]+(?:\s|$)/.test(user.text)) historyContext = context;
@@ -548,24 +567,47 @@ function registerHandlers() {
       }
     }
     session.lastEngine = engine;
-    const task = service.run({ runId, cwd: workspace.path, prompt, historyContext, inputImages, imageGeneration, model: useResponses ? resolvedModel : preferences.model, effort: preferences.effort, permissionMode: preferences.permissionMode, resumeSessionId, expectedProviderKey }).catch(error => {
+    const task = service.run({ runId, cwd: workspace.path, prompt, historyContext, inputImages, imageGeneration, model: useResponses ? resolvedModel : preferences.model, effort: preferences.effort, permissionMode: preferences.permissionMode, resumeSessionId, expectedProviderKey }).then(result => {
+      if (result?.isError && !assistant.error) {
+        errorMessage = '本次任务未完成。可以在当前对话继续，已完成的操作不会自动重跑。';
+        assistant.error = errorMessage;
+      }
+      if (result?.stopped && run?.id === runId) run.status = 'stopping';
+    }).catch(error => {
       if (run?.status !== 'stopping') { errorMessage = errorText(error); assistant.error = errorMessage; }
     }).finally(async () => {
       if (run?.id !== runId) { if (runTask === task) runTask = null; return; }
-      await refreshChanges().catch(() => {});
-      const stopped = run.status === 'stopping';
-      if (!assistant.text) assistant.text = stopped ? '任务已停止。' : errorMessage ? `本次请求失败：${errorMessage}` : '本次任务未返回文本。请查看操作记录。';
-      for (const tool of session.tools) if (tool.status === 'running') tool.status = stopped ? 'error' : 'done';
-      run = null; clearPermissions(); session.updatedAt = new Date().toISOString();
-      await store.save().catch(error => { errorMessage = errorText(error); });
-      if (runTask === task) runTask = null;
-      alignProviderSelection();
-      emit(true);
+      try {
+        await refreshChanges().catch(() => {});
+        const stopped = run.status === 'stopping';
+        assistant.status = stopped ? 'stopped' : assistant.error ? 'interrupted' : 'completed';
+        assistant.completedAt = new Date().toISOString();
+        if (!assistant.text) assistant.text = stopped ? '任务已停止。' : assistant.error ? `本次请求失败：${assistant.error}` : '本次任务未返回文本。请查看操作记录。';
+        for (const tool of session.tools) if (tool.runId === runId && tool.status === 'running') {
+          tool.status = stopped || assistant.error ? 'error' : 'done';
+        }
+      } finally {
+        if (run?.id === runId) { run = null; clearPermissions(); }
+        if (runTask === task) runTask = null;
+        session.updatedAt = new Date().toISOString();
+        await store.save().catch(error => { errorMessage = errorText(error); });
+        alignProviderSelection();
+        emit(true);
+      }
     });
     runTask = task;
     return snapshot();
     } catch (error) {
-      if (initializedRunId && run?.id === initializedRunId && !runTask) { run = null; clearPermissions(); }
+      if (initializedRunId && run?.id === initializedRunId && !runTask) {
+        const message = errorText(error);
+        Object.assign(initializedAssistant, { status: 'interrupted', error: message, completedAt: new Date().toISOString() });
+        if (!initializedAssistant.text) initializedAssistant.text = `本次请求失败：${message}`;
+        run = null; clearPermissions();
+        initializedSession.updatedAt = new Date().toISOString();
+        errorMessage = message;
+        await store.save().catch(() => {});
+        emit(true);
+      }
       throw error;
     } finally {
       sendInitializing = false;

@@ -116,6 +116,29 @@ test('question answers return through the workbench approval dialog', async t =>
   assert.equal(answer.isError, false); assert.deepEqual(JSON.parse(answer.output), { 'Which color?': 'Green' });
 });
 
+test('acceptEdits reads workspace files directly but a declined PowerShell command never executes', async t => {
+  const permissions = [];
+  const f = await fixture(t, { permissionMode: 'acceptEdits', requestPermission: async permission => {
+    permissions.push(permission);
+    return { behavior: 'deny' };
+  } });
+  await fs.writeFile(path.join(f.cwd, 'note.txt'), 'Readable fixture');
+  assert.equal((await f.tools.execute('Read', { file_path: 'note.txt' })).isError, false);
+  assert.equal((await f.tools.execute('Glob', { pattern: '*.txt' })).isError, false);
+  assert.equal((await f.tools.execute('Grep', { pattern: 'fixture' })).isError, false);
+  assert.equal(permissions.length, 0);
+  const result = await f.tools.execute('Bash', { command: "Set-Content -LiteralPath 'must-not-exist.txt' -Value 'NO'" });
+  assert.equal(result.isError, true);
+  assert.match(result.output, /用户拒绝/);
+  assert.equal(permissions.length, 1);
+  assert.equal(permissions[0].toolName, 'Bash');
+  assert.match(permissions[0].reason, /自动接受编辑.*PowerShell.*仍需确认/);
+  assert.equal(await fs.stat(path.join(f.cwd, 'must-not-exist.txt')).then(() => true, error => {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }), false);
+});
+
 test('PowerShell commands always require approval and stop on cancellation', async t => {
   const controller = new AbortController();
   const f = await fixture(t, { permissionMode: 'auto', signal: controller.signal });

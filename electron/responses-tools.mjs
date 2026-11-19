@@ -244,7 +244,9 @@ export function createWorkspaceTools({ cwd, permissionMode = 'manual', signal, r
     if (name === 'Bash') {
       const command = text(args.command, '命令', { max: 50000 });
       const timeout = number(args.timeout_ms, 60000, 1000, 120000);
-      const decision = await requestPermission({ toolName: 'Bash', input: { command, cwd: root }, reason: '此命令将使用 PowerShell 执行，请确认命令及其影响。' });
+      const decision = await requestPermission({ toolName: 'Bash', input: { command, cwd: root }, reason: permissionMode === 'acceptEdits'
+        ? '自动接受编辑已允许当前工作文件夹的文件修改；此操作是 PowerShell 命令，仍需确认。读取和编辑工作区文件可直接使用 Read、Glob、Grep、Write、Edit。'
+        : '此命令将使用 PowerShell 执行，请确认命令及其影响。读取工作区文件可直接使用 Read、Glob、Grep。' });
       if (decision?.behavior !== 'allow') throw new Error('用户拒绝了命令执行。');
       return runPowerShell(command, root, timeout, signal);
     }

@@ -178,6 +178,32 @@ test('executes function tools inside the workbench and feeds approved workspace 
   assert.equal(f.service.pendingPermissions.size, 0);
 });
 
+test('discovers a local Claude skill, reads its supporting file, and executes the requested workspace result', async t => {
+  let count = 0;
+  const f = await fixture(t, () => {
+    count++;
+    const output = count === 1 ? callItem('Skill', { skill: 'fixture-report', args: 'report.txt' }, 'skill-load')
+      : count === 2 ? callItem('ReadSkillResource', { skill: 'fixture-report', path: 'references/output.md' }, 'skill-resource')
+        : count === 3 ? callItem('Write', { file_path: 'report.txt', content: 'SKILL_VERIFIED_RESULT' }, 'skill-write')
+          : textItem('SKILL_TASK_FINISHED');
+    return sse([complete([output])]);
+  });
+  const skillDirectory = path.join(f.directory, '.claude', 'skills', 'fixture-report');
+  await fs.mkdir(path.join(skillDirectory, 'references'), { recursive: true });
+  await fs.writeFile(path.join(skillDirectory, 'SKILL.md'), '---\nname: fixture-report\ndescription: Create the fixture report using its reference.\n---\nRead references/output.md and write the requested result to $ARGUMENTS.\n');
+  await fs.writeFile(path.join(skillDirectory, 'references', 'output.md'), 'The report body is SKILL_VERIFIED_RESULT.');
+  const result = await f.run({ prompt: 'Create the fixture report.', permissionMode: 'acceptEdits' });
+  assert.equal(result.isError, false);
+  assert.equal(result.result, 'SKILL_TASK_FINISHED');
+  assert.deepEqual(f.requests[0].body.tools.slice(-2).map(tool => tool.name), ['Skill', 'ReadSkillResource']);
+  assert.match(f.requests[0].body.instructions, /fixture-report/);
+  assert.match(f.requests[1].body.input.at(-1).output, /write the requested result to report.txt/);
+  assert.match(f.requests[2].body.input.at(-1).output, /SKILL_VERIFIED_RESULT/);
+  assert.equal(await fs.readFile(path.join(f.directory, 'report.txt'), 'utf8'), 'SKILL_VERIFIED_RESULT');
+  assert.deepEqual(f.events.filter(event => event.type === 'afterTool').map(event => event.toolName), ['Skill', 'ReadSkillResource', 'Write']);
+  assert.equal(f.events.filter(event => event.type === 'permission').length, 0);
+});
+
 test('routes user questions and denied commands through the panel permission API', async t => {
   let count = 0;
   const f = await fixture(t, () => {
@@ -270,7 +296,12 @@ test('stop cancels the HTTP stream and releases the running task', async t => {
 test('stop denies pending workspace approvals without writing the requested file', async t => {
   let observed;
   const waiting = new Promise(resolve => { observed = resolve; });
-  const f = await fixture(t, () => sse([complete([callItem('Write', { file_path: 'cancelled.txt', content: 'NO' })])]));
+  let count = 0;
+  const f = await fixture(t, () => ++count === 1 ? sse([complete([
+    textItem('I have inspected the folder.'),
+    callItem('Write', { file_path: 'cancelled.txt', content: 'NO' }, 'cancelled-first'),
+    callItem('Write', { file_path: 'also-cancelled.txt', content: 'NO' }, 'cancelled-second'),
+  ])]) : sse([complete([textItem('STOP_CONTINUED')])]));
   f.onEvent = event => { if (event.type === 'permission') observed(); };
   const pending = f.run();
   await waiting;
@@ -279,8 +310,62 @@ test('stop denies pending workspace approvals without writing the requested file
   assert.equal(result.stopped, true);
   assert.equal(f.service.pendingPermissions.size, 0);
   assert.equal(await fs.stat(path.join(f.directory, 'cancelled.txt')).then(() => true, () => false), false);
+  assert.equal(await fs.stat(path.join(f.directory, 'also-cancelled.txt')).then(() => true, () => false), false);
   assert.equal(f.requests.length, 1);
+  assert.equal(f.events.filter(event => event.type === 'error').length, 0);
+  const saved = JSON.parse(await fs.readFile(path.join(f.directory, 'cache', 'direct-responses', `${result.sessionId}.json`), 'utf8'));
+  assert.equal(saved.input.filter(item => item.type === 'message').at(-1).content[0].text, 'I have inspected the folder.');
+  const calls = saved.input.filter(item => item.type === 'function_call');
+  const outputs = saved.input.filter(item => item.type === 'function_call_output');
+  assert.deepEqual(calls.map(item => item.call_id), ['cancelled-first', 'cancelled-second']);
+  assert.deepEqual(outputs.map(item => item.call_id), calls.map(item => item.call_id));
+  assert.ok(outputs.every(item => /stopped|拒绝|停止/i.test(item.output)));
+  assert.equal((await f.run({ resumeSessionId: result.sessionId, prompt: 'Continue after the cancelled tools.' })).result, 'STOP_CONTINUED');
+  assert.equal(f.requests.length, 2);
+  assert.deepEqual(f.requests[1].body.input.filter(item => item.type === 'function_call_output'), outputs);
 });
+
+for (const completesAfterStop of [false, true]) {
+  test(`manual stop preserves a safe partial reply when the response ${completesAfterStop ? 'finishes during stop' : 'aborts'}`, async t => {
+    const fragment = token.slice(0, 18);
+    const partial = `已完成第一步。${fragment}`;
+    let count = 0;
+    const f = await fixture(t, ({ request }) => {
+      if (++count > 1) return sse([complete([textItem('MANUAL_STOP_CONTINUED')])]);
+      const delta = { type: 'response.output_text.delta', item_id: 'stopped-message', delta: partial };
+      if (completesAfterStop) return sse([delta, complete([textItem(partial, 'stopped-message')])], 65536);
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(delta)}\n\n`));
+        request.signal.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')), { once: true });
+      } }), { headers: { 'content-type': 'text/event-stream' } });
+    });
+    f.onEvent = event => {
+      if (count === 1 && event.type === 'text' && event.text.includes('已完成第一步')) assert.equal(f.service.stop(), true);
+    };
+    const first = await f.run({ prompt: 'ORIGINAL_STOPPED_TASK' });
+    assert.equal(first.stopped, true);
+    assert.equal(first.isError, false);
+    assert.equal(f.service.currentRun, null);
+    assert.equal(f.service.pendingPermissions.size, 0);
+    assert.equal(f.requests.length, 1, 'Stopping must never resend a paid POST');
+    assert.equal(f.events.filter(event => event.type === 'error').length, 0);
+    assert.equal(f.events.at(-1).type, 'done');
+    assert.equal(f.events.at(-1).stopped, true);
+    const saved = await fs.readFile(path.join(f.directory, 'cache', 'direct-responses', `${first.sessionId}.json`), 'utf8');
+    const input = JSON.parse(saved).input;
+    assert.equal(input.length, 2);
+    assert.match(input[1].content[0].text, /已完成第一步。\[密钥已隐藏\].*用户停止.*未完成/s);
+    assert.equal(saved.includes(fragment), false);
+    assert.equal(JSON.stringify({ events: f.events, first }).includes(fragment), false);
+    const resumed = await f.run({ resumeSessionId: first.sessionId, prompt: 'CONTINUE_STOPPED_TASK' });
+    assert.equal(resumed.sessionId, first.sessionId);
+    assert.equal(resumed.isError, false);
+    assert.equal(resumed.result, 'MANUAL_STOP_CONTINUED');
+    assert.equal(f.requests.length, 2);
+    assert.deepEqual(f.requests[1].body.input.slice(0, 2), input);
+    assert.equal(f.requests[1].body.input.at(-1).content[0].text, 'CONTINUE_STOPPED_TASK');
+  });
+}
 
 test('times out a stalled request and rejects changed providers before sending HTTP', async t => {
   const f = await fixture(t, ({ request }) => new Promise((_resolve, reject) => request.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })), { requestTimeoutMs: 20 });
@@ -290,6 +375,194 @@ test('times out a stalled request and rejects changed providers before sending H
   assert.equal((await f.run({ expectedProviderKey: providerRequestKey({ ANTHROPIC_BASE_URL: 'https://old.invalid', ANTHROPIC_AUTH_TOKEN: token }) })).isError, true);
   assert.equal(f.requests.length, before);
   assert.match(f.events.filter(event => event.type === 'error').at(-1).error, /渠道刚刚发生变化/);
+});
+
+test('active SSE heartbeats keep a long response alive without exposing reasoning text', async t => {
+  let streamTimer;
+  const f = await fixture(t, ({ request }) => new Response(new ReadableStream({
+    start(controller) {
+      let beats = 0;
+      streamTimer = setInterval(() => {
+        if (++beats < 6) controller.enqueue(new TextEncoder().encode(': heartbeat\n\n'));
+        else {
+          clearInterval(streamTimer);
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(complete([textItem('LONG_REPLY_OK')]))}\n\n`));
+          controller.close();
+        }
+      }, 30);
+      request.signal.addEventListener('abort', () => { clearInterval(streamTimer); controller.error(new DOMException('Aborted', 'AbortError')); }, { once: true });
+    },
+    cancel() { clearInterval(streamTimer); },
+  }), { headers: { 'content-type': 'text/event-stream' } }), { requestTimeoutMs: 100 });
+  t.after(() => clearInterval(streamTimer));
+  const result = await f.run();
+  assert.equal(result.isError, false);
+  assert.equal(result.result, 'LONG_REPLY_OK');
+  assert.equal(f.requests.length, 1);
+  const progress = f.events.filter(event => event.type === 'progress');
+  assert.deepEqual(progress.map(event => event.phase), ['requesting', 'thinking', 'responding']);
+  assert.ok(progress.every(event => !('reasoning' in event) && Number.isFinite(Date.parse(event.at))));
+});
+
+test('network failure retains the interrupted visible reply and the same conversation can continue', async t => {
+  let count = 0;
+  const f = await fixture(t, ({ request }) => {
+    if (++count > 1) return sse([complete([textItem('CONTINUED_OK')])]);
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: 'response.output_text.delta', item_id: 'partial-1', delta: '已检查前半段。' })}\n\n`));
+        request.signal.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')), { once: true });
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } });
+  }, { requestTimeoutMs: 25 });
+  const first = await f.run({ prompt: 'ORIGINAL_TASK' });
+  assert.equal(first.isError, true);
+  assert.equal(f.service.currentRun, null);
+  assert.equal(f.requests.length, 1, 'A failed paid POST must not be retried automatically');
+  assert.match(f.events.find(event => event.type === 'error').error, /超时.*当前聊天继续/);
+  const saved = JSON.parse(await fs.readFile(path.join(f.directory, 'cache', 'direct-responses', `${first.sessionId}.json`), 'utf8'));
+  assert.match(saved.input.at(-1).content[0].text, /已检查前半段.*回复因请求中断/s);
+  const second = await f.run({ resumeSessionId: first.sessionId, prompt: 'CONTINUE_TASK' });
+  assert.equal(second.sessionId, first.sessionId);
+  assert.equal(second.isError, false);
+  assert.equal(second.result, 'CONTINUED_OK');
+  assert.match(f.requests[1].body.input.at(-2).content[0].text, /已检查前半段.*未完成/s);
+  assert.equal(f.requests[1].body.input.at(-1).content[0].text, 'CONTINUE_TASK');
+});
+
+test('fetch failures explain the transport code and release the session without a silent retry', async t => {
+  let count = 0;
+  const f = await fixture(t, () => {
+    if (++count === 1) throw new TypeError('fetch failed', { cause: { code: 'ECONNRESET', message: token } });
+    return sse([complete([textItem('RECOVERED')])]);
+  });
+  const first = await f.run();
+  assert.equal(first.isError, true);
+  assert.equal(f.requests.length, 1);
+  assert.match(f.events.find(event => event.type === 'error').error, /连接中断（ECONNRESET）.*当前聊天继续/);
+  assert.equal(JSON.stringify(f.events).includes(token), false);
+  assert.equal(f.service.currentRun, null);
+  assert.equal((await f.run({ resumeSessionId: first.sessionId })).result, 'RECOVERED');
+});
+
+test('notification failure while flushing redaction still releases the service lock and emits done', async t => {
+  const f = await fixture(t, () => sse([{ type: 'response.output_text.delta', item_id: 'message-1', delta: token.slice(0, 12) }]));
+  let fail = true;
+  f.onEvent = event => {
+    if (fail && event.type === 'text' && event.text === '[密钥已隐藏]') { fail = false; throw new Error('Fixture UI notification failed'); }
+  };
+  await assert.rejects(f.run(), /Fixture UI notification failed/);
+  assert.equal(f.service.currentRun, null);
+  assert.equal(f.events.filter(event => event.type === 'done').length, 1);
+  assert.equal(f.service.pendingPermissions.size, 0);
+  assert.equal(JSON.stringify(f.events).includes(token), false);
+  const sessionId = f.events.find(event => event.type === 'session').sessionId;
+  const saved = await fs.readFile(path.join(f.directory, 'cache', 'direct-responses', `${sessionId}.json`), 'utf8');
+  assert.equal(saved.includes(token.slice(0, 12)), false, 'A withheld credential prefix must not enter the interrupted history');
+  await f.run();
+  assert.equal(f.service.currentRun, null);
+});
+
+test('reasoning-only completion after tool progress is reported as incomplete instead of a finished task', async t => {
+  let count = 0;
+  const f = await fixture(t, () => ++count === 1 ? sse([complete([textItem('I will inspect the files.'), callItem('Glob', { pattern: '*' })])]) : sse([complete([{ type: 'reasoning', id: 'reason-no-final', summary: [], encrypted_content: 'encrypted-fixture' }])]));
+  assert.equal((await f.run()).isError, true);
+  assert.match(f.events.find(event => event.type === 'error').error, /本轮未返回.*最终回复.*当前聊天继续/);
+  assert.equal(f.service.currentRun, null);
+  assert.match(f.requests[0].body.instructions, /Continue calling tools while work remains/);
+});
+
+test('commentary continues the same task through tools and an explicit final answer while preserving phase', async t => {
+  const progress = { ...textItem('PROGRESS_ONLY', 'progress-message'), phase: 'commentary' };
+  const final = { ...textItem('PHASE_TASK_FINISHED', 'final-message'), phase: 'final_answer' };
+  let count = 0;
+  const f = await fixture(t, async ({ body }, service) => {
+    count++;
+    assert.equal(body.input.filter(item => item.role === 'user').length, 1, 'Continuation must not fabricate a user turn');
+    if (count === 1) return sse([complete([progress])]);
+    assert.deepEqual(body.input.find(item => item.id === progress.id), progress);
+    if (count === 2) {
+      const saved = JSON.parse(await fs.readFile(service.currentRun.historyPath, 'utf8'));
+      assert.deepEqual(saved.input.at(-1), progress, 'Progress must be checkpointed before the next request');
+      return sse([complete([callItem('Write', { file_path: 'phase-result.txt', content: 'PHASE_TOOL_EXECUTED' }, 'phase-write')])]);
+    }
+    assert.equal(count, 3);
+    assert.equal(body.input.at(-1).type, 'function_call_output');
+    assert.equal(body.input.at(-1).call_id, 'phase-write');
+    assert.equal(await fs.readFile(path.join(f.directory, 'phase-result.txt'), 'utf8'), 'PHASE_TOOL_EXECUTED');
+    return sse([complete([final])]);
+  });
+  const result = await f.run({ permissionMode: 'acceptEdits' });
+  assert.equal(result.isError, false);
+  assert.equal(result.result, 'PROGRESS_ONLY\n\nPHASE_TASK_FINISHED');
+  assert.equal(f.requests.length, 3);
+  assert.equal(f.events.filter(event => event.type === 'done').length, 1);
+  assert.equal(f.events.some(event => event.type === 'error'), false);
+  const saved = JSON.parse(await fs.readFile(path.join(f.directory, 'cache', 'direct-responses', `${result.sessionId}.json`), 'utf8'));
+  assert.deepEqual(saved.input.filter(item => item.type === 'message'), [progress, final]);
+});
+
+test('a response ending in final_answer finishes even when it also contains commentary', async t => {
+  const progress = { ...textItem('UPDATING_RESULT', 'progress-in-final'), phase: 'commentary' };
+  const final = { ...textItem('RESULT_COMPLETE', 'explicit-final'), phase: 'final_answer' };
+  const f = await fixture(t, () => sse([complete([progress, final])]));
+  const result = await f.run();
+  assert.equal(result.isError, false);
+  assert.equal(result.result, 'UPDATING_RESULT\n\nRESULT_COMPLETE');
+  assert.equal(f.requests.length, 1);
+  const saved = JSON.parse(await fs.readFile(path.join(f.directory, 'cache', 'direct-responses', `${result.sessionId}.json`), 'utf8'));
+  assert.deepEqual(saved.input.filter(item => item.type === 'message'), [progress, final]);
+});
+
+test('messages without phase keep legacy final behavior regardless of progress-like wording', async t => {
+  const f = await fixture(t, () => sse([complete([textItem('我会继续检查。I will continue working.')])]));
+  const result = await f.run();
+  assert.equal(result.isError, false);
+  assert.equal(result.result, '我会继续检查。I will continue working.');
+  assert.equal(f.requests.length, 1, 'Continuation must depend on phase rather than matching prose');
+});
+
+test('consecutive commentary is checkpointed and bounded by the same task round limit', async t => {
+  let count = 0;
+  const f = await fixture(t, ({ body }) => {
+    count++;
+    assert.equal(body.input.filter(item => item.role === 'user').length, count <= 50 ? 1 : 2);
+    const output = count <= 50
+      ? { ...textItem(`PROGRESS_ROUND_${count}`, `progress-${count}`), phase: 'commentary' }
+      : { ...textItem('COMMENTARY_LIMIT_CONTINUED', 'final-after-limit'), phase: 'final_answer' };
+    return sse([complete([output])]);
+  });
+  const first = await f.run();
+  assert.equal(first.isError, true);
+  assert.equal(f.requests.length, 50);
+  assert.match(f.events.find(event => event.type === 'error').error, /50 轮操作上限.*当前聊天发送/);
+  assert.equal(f.service.currentRun, null);
+  const saved = JSON.parse(await fs.readFile(path.join(f.directory, 'cache', 'direct-responses', `${first.sessionId}.json`), 'utf8'));
+  assert.equal(saved.input.filter(item => item.phase === 'commentary').length, 50);
+  assert.equal(saved.input.at(-1).content[0].text, 'PROGRESS_ROUND_50');
+  const second = await f.run({ resumeSessionId: first.sessionId, prompt: 'Continue the checkpointed task.' });
+  assert.equal(second.isError, false);
+  assert.equal(second.sessionId, first.sessionId);
+  assert.equal(second.result, 'COMMENTARY_LIMIT_CONTINUED');
+  assert.equal(f.requests.length, 51);
+  assert.equal(f.requests[50].body.input.filter(item => item.phase === 'commentary').length, 50);
+});
+
+test('the bounded tool loop checkpoints its completed actions and allows continuation in the same session', async t => {
+  let count = 0;
+  const f = await fixture(t, () => {
+    count++;
+    return sse([complete([count <= 50 ? callItem('Glob', { pattern: '*' }, `round-${count}`) : textItem('LIMIT_CONTINUED')])]);
+  });
+  const first = await f.run();
+  assert.equal(first.isError, true);
+  assert.equal(f.requests.length, 50);
+  assert.match(f.events.find(event => event.type === 'error').error, /50 轮操作上限.*当前聊天发送/);
+  assert.equal(f.service.currentRun, null);
+  const second = await f.run({ resumeSessionId: first.sessionId, prompt: '继续完成任务' });
+  assert.equal(second.isError, false);
+  assert.equal(second.result, 'LIMIT_CONTINUED');
+  assert.equal(f.requests[50].body.input.filter(item => item.type === 'function_call_output').length, 50);
 });
 
 test('does not lose context silently when a local resumed session is missing', async t => {

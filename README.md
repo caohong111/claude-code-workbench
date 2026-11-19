@@ -7,6 +7,7 @@ Claude Code CLI 的 Windows 可视化桌面工作台。打开项目文件夹，�
 ## 功能
 
 - 工作区、多个对话、文件浏览、修改对比和工具操作记录。
+- 中断后保留已显示回复，可在同一对话点击“继续任务”；不会自动重发失败请求。
 - 常用 Claude Code 命令的分类菜单及配置表单；尚未支持的原生功能会标明不可用。
 - 读取 Claude 配置，跟随 CC Switch 切换渠道，获取模型列表。
 - 截图粘贴、图片附件、聊天中的本地图片和 SVG 原文件预览、下载。
@@ -15,6 +16,8 @@ Claude Code CLI 的 Windows 可视化桌面工作台。打开项目文件夹，�
 - 回车发送，Ctrl + 回车换行；支持中文输入法。
 
 Claude 模型使用官方 Claude Agent SDK；兼容的 GPT 代码对话通过配置渠道的 Responses API 执行，不需要启动 Codex。命令能力边界见 [官方命令核对记录](docs/official-command-audit.md)。
+
+Responses 对话会发现 Claude 用户及项目中的本地技能，以及已安装、启用且作用域匹配的插件技能，按需读取技能和辅助文件。插件 MCP、Hook、动态命令注入和原生子代理仍需 Claude 原生模型路径；工作台不会将读取技能说明当作已执行这些能力。
 
 ## 安装方式一：Windows 安装包
 
@@ -58,6 +61,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 若你的 CC Switch 使用自定义 Claude 配置目录，请先为工作台进程设置 `CLAUDE_CONFIG_DIR`。该目录不会因为安装本项目而自动复制或覆盖。
 
 “手动确认”是默认权限。文件修改和命令执行是否需要确认，以当前模式及工具限制为准。计划模式不能生成图片。图片按钮“AI 生图”使用当前渠道支持的图片工具，生成文件写入项目的 `generated-images` 文件夹。
+
+“自动接受编辑”会跳过工作区文件编辑确认，执行命令仍需确认。Responses 模式优先使用内置文件读写工具；“自动判断”在该模式下同样保留命令确认。
 
 ## 本地数据与隐私
 

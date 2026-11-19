@@ -53,6 +53,7 @@ export class ClaudeService {
       outputText: '',
       pendingText: '',
       result: '',
+      receivedResult: false,
       hadError: false,
       secrets: [],
     };
@@ -105,7 +106,7 @@ export class ClaudeService {
         env,
         model: model === 'default' ? (run.configuredModel || 'default') : (model || undefined),
         effort,
-        permissionMode: mode,
+        permissionMode: mode === 'manual' ? 'default' : mode,
         permissionPrompts: 'host',
         settingSources: ['user', 'project', 'local'],
         settings: { fastMode: run.fastMode },
@@ -144,26 +145,29 @@ export class ClaudeService {
         if (run.stopped) break;
         await this._message(run, message);
       }
-      if (!run.hadError && !run.stopped && !run.result && !run.outputText) {
-        throw new Error(run.lastStderr || 'Claude exited without returning a response. Check the selected model and API configuration.');
+      if (!run.hadError && !run.stopped && !run.receivedResult) {
+        throw new Error(run.lastStderr || 'Claude 的连接已中断，未收到任务完成确认。已保留当前回复，可继续本次聊天。');
       }
-      return this._clean(run, { sessionId: run.sessionId, result: run.result || run.outputText, stopped: run.stopped, isError: run.hadError });
     } catch (error) {
+      if (!run.stopped) run.hadError = true;
       if (!run.stopped && !run.controller.signal.aborted) {
-        run.hadError = true;
         await this._emit(run, { type: 'error', error: this._errorMessage(run, error) });
       }
-      return { sessionId: run.sessionId, stopped: run.stopped, isError: !run.stopped };
     } finally {
       this._cancelPermissions(run);
       try { run.query?.close?.(); } catch { /* The SDK may already have closed its transport. */ }
       if (this.currentRun === run) this.currentRun = null;
-      if (run.pendingText) await this._emit(run, { type: 'text', text: run.pendingText });
-      await this._emit(run, {
-        type: 'done', result: run.stopped ? CANCELLED : (run.result || run.outputText),
-        stopped: run.stopped, isError: run.hadError, sessionId: run.sessionId,
-      });
+      const trailingText = this._finalizeText(run);
+      try {
+        if (trailingText) await this._emit(run, { type: 'text', text: trailingText });
+      } finally {
+        await this._emit(run, {
+          type: 'done', result: run.stopped ? CANCELLED : (run.result || run.outputText),
+          stopped: run.stopped, isError: run.hadError, sessionId: run.sessionId,
+        });
+      }
     }
+    return this._clean(run, { sessionId: run.sessionId, result: run.result || run.outputText, stopped: run.stopped, isError: run.hadError });
   }
 
   stop() {
@@ -328,6 +332,16 @@ export class ClaudeService {
     if (visibleText) await this._emit(run, { type: 'text', text: visibleText });
   }
 
+  _finalizeText(run) {
+    const pending = run.pendingText;
+    if (!pending) return '';
+    run.pendingText = '';
+    // An unfinished secret prefix must stay private even when the transport ends early.
+    if (run.outputText.endsWith(pending)) run.outputText = run.outputText.slice(0, -pending.length) + '[REDACTED]';
+    if (run.result.endsWith(pending)) run.result = run.result.slice(0, -pending.length) + '[REDACTED]';
+    return '[REDACTED]';
+  }
+
   async _message(run, message) {
     if (message.session_id && message.session_id !== run.sessionId) {
       run.sessionId = message.session_id;
@@ -398,6 +412,7 @@ export class ClaudeService {
       return;
     }
     if (message.type === 'result') {
+      run.receivedResult = true;
       const usage = message.usage ?? {};
       await this._emit(run, {
         type: 'usage', usage: {

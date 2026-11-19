@@ -69,6 +69,35 @@ export async function readTextFile(root, relative, limit = 512 * 1024) {
   } finally { await handle.close(); }
 }
 
+function recoverInterruptedSessions(data) {
+  const completedAt = new Date().toISOString();
+  const message = '工作台上次关闭时任务尚未完成，已保留现有内容，可以继续任务。';
+  for (const session of Array.isArray(data.sessions) ? data.sessions : []) {
+    const messages = Array.isArray(session.messages) ? session.messages : [];
+    const runningTools = (Array.isArray(session.tools) ? session.tools : []).filter(tool => tool?.status === 'running');
+    const latest = messages.at(-1);
+    const latestTime = Date.parse(latest?.createdAt);
+    const legacyInterrupted = session.id === data.activeSessionId && latest?.role === 'assistant'
+      && latest.status == null && !latest.error && !String(latest.text || '').trim()
+      && Number.isFinite(latestTime) && runningTools.some(tool => {
+        const toolTime = typeof tool.createdAt === 'number' ? tool.createdAt : Date.parse(tool.createdAt);
+        return Number.isFinite(toolTime) && toolTime >= latestTime;
+      });
+    // Persisted running operations belong to the previous process and cannot still be active.
+    for (const item of messages) {
+      if (item?.role !== 'assistant' || (item.status !== 'running' && !(legacyInterrupted && item === latest))) continue;
+      item.status = 'interrupted';
+      item.error ||= message;
+      item.completedAt ||= completedAt;
+      if (!item.text) item.text = '上次任务已中断，可以从当前对话继续。';
+    }
+    for (const tool of runningTools) {
+      tool.status = 'error';
+      if (!tool.output) tool.output = '工作台已重启，上次工具操作未确认完成。';
+    }
+  }
+}
+
 export class WorkspaceStore {
   constructor(directory) {
     this.directory = directory;
@@ -82,6 +111,7 @@ export class WorkspaceStore {
       const loaded = JSON.parse(await fs.readFile(this.file, 'utf8'));
       this.data = { ...this.data, ...loaded, preferences: { ...this.data.preferences, ...loaded.preferences } };
     } catch (error) { if (error.code !== 'ENOENT') throw new Error('工作台历史文件无法读取，请保留文件并检查 workspaces.json。'); }
+    recoverInterruptedSessions(this.data);
     return this.data;
   }
   save() {

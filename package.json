@@ -1,6 +1,6 @@
 {
   "name": "claude-code-workbench",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "An independent visual desktop workbench for Claude Code and compatible API providers",
   "license": "MIT",
@@ -18,6 +18,7 @@
     "test": "node --test tests/*.test.mjs",
     "test:desktop": "node tests/desktop-smoke.mjs",
     "test:direct": "node tests/desktop-direct.mjs",
+    "test:recovery": "node tests/desktop-recovery.mjs",
     "test:clipboard": "node tests/desktop-clipboard.mjs",
     "test:media": "node tests/desktop-media.mjs",
     "test:themes": "node tests/desktop-themes.mjs",

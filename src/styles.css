@@ -148,6 +148,12 @@ textarea { resize: none; }
 .message-heading .icon-button svg { width: 13px; }
 .message:hover .message-heading .icon-button, .message:focus-within .message-heading .icon-button { opacity: 1; }
 .message-body { margin-left: 46px; }
+.message-outcome { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0 0 46px; color: var(--text-muted); font-size: 11px; }
+.message-outcome > svg { flex-shrink: 0; color: var(--warning); }
+.message-outcome button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; color: var(--accent); background: var(--surface-raised); }
+.message-outcome button:hover { background: var(--accent-soft); }
+.message-outcome button:disabled { opacity: .5; cursor: default; }
+.permission-hint { display: block; max-width: 34ch; color: var(--text-subtle); font-size: 11px; line-height: 1.6; white-space: normal; }
 .message-user .message-heading { flex-direction: row-reverse; }
 .message-user .message-heading .icon-button { margin-left: 0; margin-right: auto; }
 .message-user .message-body { width: fit-content; max-width: min(85%, 760px); margin-left: auto; margin-right: 46px; padding: 11px 14px; border: 1px solid var(--session-accent, var(--accent-border)); background: var(--accent-soft); border-radius: 6px; text-align: left; }
@@ -407,6 +413,7 @@ textarea { resize: none; }
   .message-list { padding-top: 19px; padding-bottom: 22px; }
   .message { margin-bottom: 24px; }
   .message-body { margin-left: 0; }
+  .message-outcome { margin-left: 0; }
   .message-heading { margin-bottom: 9px; }
   .message-heading .icon-button { opacity: 1; }
   .session-row .delete-session { opacity: 1; }

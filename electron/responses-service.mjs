@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createParser } from 'eventsource-parser';
 import { providerRequestKey } from './provider-config.mjs';
 import { createWorkspaceTools } from './responses-tools.mjs';
+import { createResponsesExtensions } from './responses-extensions.mjs';
 import { persistInputImages, hydrateInputImages, saveGeneratedImages, generatedImageMarkdown } from './responses-images.mjs';
 
 const MODES = new Set(['manual', 'acceptEdits', 'auto', 'plan']);
@@ -25,6 +26,15 @@ function responseEndpoint(value) {
 
 const sameFolder = (left, right) => process.platform === 'win32' ? path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase() : path.resolve(left) === path.resolve(right);
 const userInput = (text, images) => ({ role: 'user', content: [{ type: 'input_text', text }, ...images] });
+
+function failureMessage(error, timedOut) {
+  if (error?.name === 'TimeoutError' || timedOut) return '模型接口等待数据超时，连接已结束。可以在当前聊天继续发送；本次请求不会自动重发。';
+  const code = error?.cause?.code || error?.code;
+  if (/^(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EPIPE|UND_ERR_(?:SOCKET|CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT))$/.test(code || '') || /^(?:fetch failed|terminated)$/i.test(error?.message || '')) {
+    return `与模型接口的连接中断${typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,60}$/.test(code) ? `（${code}）` : ''}。可以在当前聊天继续发送；本次请求不会自动重发。`;
+  }
+  return error?.message || '模型请求失败。';
+}
 
 export class ResponsesService {
   constructor({ configDirectory, tempDirectory, cacheDirectory, onEvent = () => {}, fetchImpl = globalThis.fetch, toolsFactory = createWorkspaceTools, environment = process.env, requestTimeoutMs = 180000 }) {
@@ -63,22 +73,29 @@ export class ResponsesService {
         onEvent: event => this._emit(run, event),
         redact: value => this._redact(run, String(value)),
       });
+      const extensions = await createResponsesExtensions({ cwd: run.cwd, configDirectory: this.configDirectory, prompt, permissionMode, signal: run.controller.signal, onEvent: event => this._emit(run, event), redact: value => this._redact(run, String(value)) });
       const images = await persistInputImages(this.cacheDirectory, inputImages, run.controller.signal);
       const input = [...history, userInput(this._redact(run, prompt), images)];
+      run.input = input;
       await this._saveHistory(run, input);
       for (let round = 0; round < MAX_ROUNDS; round++) {
         if (run.stopped) break;
         this._assertHistory(input);
-        const instructions = `You are the coding assistant inside Claude Workbench. The user works in ${run.cwd}. Reply in the user's language. Use the provided workspace tools when the task requires inspecting or modifying real files. Do not claim to inspect files or execute commands without using a tool. Tool names match the desktop activity and permission controls. Bash runs PowerShell on Windows. ${permissionMode === 'plan' ? 'Planning mode: only inspect and discuss. File modifications and shell commands are unavailable. Return a plan for review.' : 'Respect the permission decisions returned by the desktop. Never work around a declined tool request.'}`;
-        const body = { model: run.model, instructions: run.imageGeneration ? 'Generate or edit the requested image using the image_generation tool. Use the supplied reference images when present. Return a real bitmap image, not SVG source or a description. Reply in the user\'s language.' : instructions, input: await hydrateInputImages(this.cacheDirectory, input, run.controller.signal), tools: run.imageGeneration ? [{ type: 'image_generation', model: imageModel }] : tools.definitions, parallel_tool_calls: false, stream: true, store: false, include: ['reasoning.encrypted_content'] };
+        const instructions = `You are the coding assistant inside Claude Workbench. The user works in ${run.cwd}. Reply in the user's language. Use the provided workspace tools when the task requires inspecting or modifying real files. Do not claim to inspect files or execute commands without using a tool. For action requests, inspect the relevant files, carry out the work, verify the outcome, and deliver the result. Continue calling tools while work remains; a progress update is not a completed task. Finish only when the requested work is complete, the user asks to stop, or a concrete blocker or missing user decision prevents progress. State real blockers clearly and never claim to keep working after a final reply. Prefer Read, Glob, and Grep for workspace inspection and Write or Edit for file changes. Workspace reads are already authorized; ${permissionMode === 'acceptEdits' || permissionMode === 'auto' ? 'workspace file edits are also already authorized, so do not ask for the same permission in prose. ' : ''}Tool names match the desktop activity and permission controls. Bash runs PowerShell on Windows and requires the desktop permission decision. ${permissionMode === 'plan' ? 'Planning mode: only inspect and discuss. File modifications and shell commands are unavailable. Return a plan for review.' : 'Respect the permission decisions returned by the desktop. Never work around a declined tool request.'}\n\n${extensions.instructions}`;
+        const body = { model: run.model, instructions: run.imageGeneration ? 'Generate or edit the requested image using the image_generation tool. Use the supplied reference images when present. Return a real bitmap image, not SVG source or a description. Reply in the user\'s language.' : instructions, input: await hydrateInputImages(this.cacheDirectory, input, run.controller.signal), tools: run.imageGeneration ? [{ type: 'image_generation', model: imageModel }] : [...tools.definitions, ...extensions.definitions], parallel_tool_calls: false, stream: true, store: false, include: ['reasoning.encrypted_content'] };
         if (run.imageGeneration) {
           body.tool_choice = { type: 'image_generation' };
           if (imageSize !== undefined) body.tools[0].size = imageSize;
         }
         if (/^(?:gpt-[5-9]|o\d|codex-)/i.test(run.model)) body.reasoning = { effort: effort === 'max' ? 'xhigh' : effort };
+        run.requestTextOffset = run.outputText.length;
+        run.requestPending = true;
+        run.requestHasOutputText = false;
+        await this._progress(run, 'requesting');
         const output = await this._request(run, endpoint, token, body);
         if (run.stopped) break;
         input.push(...output);
+        run.requestPending = false;
         const calls = output.filter(item => item.type === 'function_call');
         for (const call of calls) {
           let result;
@@ -89,7 +106,8 @@ export class ResponsesService {
             catch { result = { output: 'Invalid tool arguments: expected a JSON object.', isError: true }; }
             if (!result && (!argumentsValue || typeof argumentsValue !== 'object' || Array.isArray(argumentsValue))) result = { output: 'Invalid tool arguments: expected a JSON object.', isError: true };
             if (!result) {
-              try { result = await tools.execute(call.name, argumentsValue, { toolUseId: call.call_id }); }
+              await this._progress(run, 'tool', call.name);
+              try { result = await (extensions.hasTool(call.name) ? extensions : tools).execute(call.name, argumentsValue, { toolUseId: call.call_id }); }
               catch (error) { result = { output: error?.message || 'Tool execution failed.', isError: true }; }
             }
           }
@@ -98,27 +116,34 @@ export class ResponsesService {
         }
         await this._saveHistory(run, input);
         if (!calls.length) {
-          if (!run.outputText) throw new Error('模型未返回可显示的内容，请重新发送任务。');
-          break;
+          const messages = output.filter(item => item.type === 'message');
+          if (!messages.some(item => item.content?.some(content => typeof content.text === 'string' && content.text.trim() || typeof content.refusal === 'string' && content.refusal.trim()))) throw new Error('模型本轮未返回可显示的最终回复，已保留操作记录，可以在当前聊天继续发送。');
+          if (messages.at(-1)?.phase !== 'commentary') break;
         }
-        if (round === MAX_ROUNDS - 1) throw new Error('任务已达到 50 轮操作上限，请检查操作记录后继续。');
+        if (round === MAX_ROUNDS - 1) throw new Error('任务已达到本次 50 轮操作上限，已保留操作记录；可以在当前聊天发送“继续完成任务”。');
       }
+      if (run.stopped) await this._savePartialReply(run);
       return this._clean(run, { sessionId: run.sessionId, result: run.pendingText ? run.outputText.slice(0, -run.pendingText.length) + '[密钥已隐藏]' : run.outputText, stopped: run.stopped, isError: run.hadError });
     } catch (error) {
+      let message = failureMessage(error, run.requestTimedOut);
+      try { await this._savePartialReply(run); }
+      catch { message += ' 未完成回复暂时无法写入本地记录，请保留当前显示内容。'; }
       if (!run.stopped) {
         run.hadError = true;
-        const message = error?.name === 'TimeoutError' || run.requestTimedOut ? '模型请求超时，请重试。' : error?.message || '模型请求失败。';
         await this._emit(run, { type: 'error', error: message });
       }
       return this._clean(run, { sessionId: run.sessionId, stopped: run.stopped, isError: !run.stopped });
     } finally {
       this._cancelPermissions(run);
-      if (run.pendingText) {
-        run.outputText = run.outputText.slice(0, -run.pendingText.length) + '[密钥已隐藏]';
-        await this._emit(run, { type: 'text', text: '[密钥已隐藏]' });
-      }
       if (this.currentRun === run) this.currentRun = null;
-      await this._emit(run, { type: 'done', result: run.stopped ? '任务已停止。' : run.outputText, stopped: run.stopped, isError: run.hadError, sessionId: run.sessionId });
+      try {
+        if (run.pendingText) {
+          run.outputText = run.outputText.slice(0, -run.pendingText.length) + '[密钥已隐藏]';
+          await this._emit(run, { type: 'text', text: '[密钥已隐藏]' });
+        }
+      } finally {
+        await this._emit(run, { type: 'done', result: run.stopped ? '任务已停止。' : run.outputText, stopped: run.stopped, isError: run.hadError, sessionId: run.sessionId });
+      }
     }
   }
 
@@ -158,19 +183,37 @@ export class ResponsesService {
     } finally { await fs.rm(temporary, { force: true }).catch(() => {}); }
   }
 
+  async _savePartialReply(run) {
+    if (!run.requestPending || !run.input || run.outputText.length <= run.requestTextOffset) return;
+    let partial = run.outputText.slice(run.requestTextOffset);
+    if (run.pendingText && partial.endsWith(run.pendingText)) partial = partial.slice(0, -run.pendingText.length) + '[密钥已隐藏]';
+    const reason = run.stopped ? '用户停止' : '请求中断';
+    run.input.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `${partial}\n\n[此段回复因${reason}而未完成，后续对话可继续。]` }] });
+    run.requestPending = false;
+    await this._saveHistory(run, run.input);
+  }
+
   async _request(run, endpoint, token, body) {
     const controller = new AbortController();
     const stop = () => controller.abort(run.controller.signal.reason);
     run.controller.signal.addEventListener('abort', stop, { once: true });
     if (run.controller.signal.aborted) stop();
     run.requestTimedOut = false;
-    const timer = setTimeout(() => { run.requestTimedOut = true; controller.abort(); }, this.requestTimeoutMs);
+    let timer;
+    const beginWaiting = () => { clearTimeout(timer); timer = setTimeout(() => { run.requestTimedOut = true; controller.abort(); }, this.requestTimeoutMs); };
+    const read = async streamReader => {
+      beginWaiting();
+      try { return await streamReader.read(); }
+      finally { clearTimeout(timer); }
+    };
     let reader;
     try {
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json', ...(run.imageGeneration ? { 'X-Codex-Image-Turn-Id': run.imageTurnId } : {}) };
+      beginWaiting();
       const response = await this.fetchImpl(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal, redirect: 'error' });
+      clearTimeout(timer);
       if (!response.ok) {
-        const value = await this._readLimited(response, 32768);
+        const value = await this._readLimited(response, 32768, read);
         let message;
         try { const parsed = JSON.parse(value); message = parsed.error?.message || parsed.message; } catch {}
         const hint = run.imageGeneration && response.status === 403 ? ' 请检查中转站当前密钥所属分组是否已开启图片生成权限。' : run.imageGeneration && response.status === 503 ? ' 当前渠道暂时没有可用的生图服务，请检查中转站上游和生图模型配置。' : '';
@@ -178,7 +221,7 @@ export class ResponsesService {
       }
       if (response.headers.get('content-type')?.includes('application/json')) {
         let value;
-        try { value = JSON.parse(await this._readLimited(response, run.imageGeneration ? MAX_IMAGE_RESPONSE : MAX_RESPONSE)); } catch { throw new Error('模型接口返回了无效或过大的 JSON。'); }
+        try { value = JSON.parse(await this._readLimited(response, run.imageGeneration ? MAX_IMAGE_RESPONSE : MAX_RESPONSE, read)); } catch { throw new Error('模型接口返回了无效或过大的 JSON。'); }
         return this._finalOutput(run, value, new Map());
       }
       if (!response.body) throw new Error('模型接口未返回数据流。');
@@ -192,11 +235,12 @@ export class ResponsesService {
       let completed;
       const parser = createParser({ maxBufferSize: run.imageGeneration ? 64 * 1024 * 1024 : 4 * 1024 * 1024, onEvent(event) { if (event.data !== '[DONE]') events.push(event); }, onError(error) { if (error.type === 'max-buffer-size-exceeded') parseError = new Error('模型返回的单条数据过大。'); } });
       while (!completed) {
-        const chunk = await reader.read();
+        const chunk = await read(reader);
         if (chunk.done) { parser.feed(decoder.decode()); break; }
         bytes += chunk.value.byteLength;
         if (bytes > (run.imageGeneration ? MAX_IMAGE_RESPONSE : MAX_RESPONSE)) throw new Error('模型返回的数据过大，请缩小任务后重试。');
         parser.feed(decoder.decode(chunk.value, { stream: true }));
+        await this._progress(run, run.requestHasOutputText ? 'responding' : 'thinking');
         if (parseError) throw parseError;
         while (events.length) {
           const event = events.shift();
@@ -206,6 +250,7 @@ export class ResponsesService {
           if (type === 'response.output_text.delta' || type === 'response.refusal.delta') {
             const key = `${data.item_id ?? data.output_index ?? 'message'}:${data.content_index || 0}`;
             const delta = data.delta || '';
+            if (delta) { run.requestHasOutputText = true; await this._progress(run, 'responding'); }
             receivedText.set(key, (receivedText.get(key) || '') + delta);
             await this._appendText(run, key, delta);
           } else if (type === 'response.output_text.done' || type === 'response.refusal.done') {
@@ -232,7 +277,7 @@ export class ResponsesService {
     }
   }
 
-  async _readLimited(response, limit) {
+  async _readLimited(response, limit, read = reader => reader.read()) {
     if (!response.body) return '';
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -240,7 +285,7 @@ export class ResponsesService {
     let bytes = 0;
     try {
       while (true) {
-        const chunk = await reader.read();
+        const chunk = await read(reader);
         if (chunk.done) break;
         bytes += chunk.value.byteLength;
         if (bytes > limit) throw new Error('模型接口返回的数据过大。');
@@ -336,6 +381,8 @@ export class ResponsesService {
 
   async _appendText(run, itemId, text) {
     if (!text) return;
+    run.requestHasOutputText = true;
+    await this._progress(run, 'responding');
     if (run.outputText.length + text.length > MAX_TEXT) throw new Error('模型回复过长，请缩小任务后重试。');
     const separator = run.outputText && run.lastTextItem !== itemId && !run.outputText.endsWith('\n') ? '\n\n' : '';
     const addition = separator + text;
@@ -349,6 +396,15 @@ export class ResponsesService {
     run.pendingText = retained ? safe.slice(-retained) : '';
     const visible = retained ? safe.slice(0, -retained) : safe;
     if (visible) await this._emit(run, { type: 'text', text: visible });
+  }
+
+  async _progress(run, phase, toolName) {
+    const now = Date.now();
+    const key = `${phase}:${toolName || ''}`;
+    if (run.progressKey === key && now - run.progressAt < 5000) return;
+    run.progressKey = key;
+    run.progressAt = now;
+    await this._emit(run, { type: 'progress', phase, ...(toolName ? { toolName } : {}), at: new Date(now).toISOString() });
   }
 
   _redact(run, value) { let text = String(value); for (const secret of run.secrets) text = text.split(secret).join('[密钥已隐藏]'); return text.replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, '[密钥已隐藏]'); }
