@@ -239,6 +239,7 @@ async function onServiceEvent(event) {
       if (index >= 0) permissionQueue[index] = event.permission; else permissionQueue.push(event.permission);
       syncPermission(); emit(true); break;
     }
+    case 'imageContext': if (assistant) assistant.imageContextNotice = event.notice; break;
     case 'usage': session.usage = event.usage; break;
     case 'beforeTool': await captureBefore(event); break;
     case 'afterTool': await refreshChanges(); break;

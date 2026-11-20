@@ -57,36 +57,57 @@ export async function persistInputImages(cacheDirectory, images = [], signal) {
   return references;
 }
 
-export async function hydrateInputImages(cacheDirectory, input, signal) {
-  let total = 0;
-  const result = [];
-  for (const item of input) {
-    if (item.role !== 'user' || !Array.isArray(item.content)) { result.push(item); continue; }
-    const content = [];
-    for (const part of item.content) {
-      if (part.type !== 'workbench_input_image') { content.push(part); continue; }
+async function readCachedImage(directory, part, remaining, signal) {
+  if (!REFERENCE.test(part.attachmentId || '') || !MIME_TYPES.has(part.mimeType)) throw new Error('invalid image reference');
+  const file = await fs.open(path.join(directory, part.attachmentId), 'r');
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || !stat.size || stat.size > INPUT_IMAGE_LIMIT) throw new Error('invalid cached image');
+    if (stat.size > remaining) return null;
+    const bytes = await file.readFile({ signal });
+    if (bytes.length !== stat.size) throw new Error('cached image size changed');
+    const actual = imageType(bytes);
+    if (actual.mimeType !== part.mimeType || `${createHash('sha256').update(bytes).digest('hex')}.${actual.extension}` !== part.attachmentId) throw new Error('cached image changed');
+    return bytes;
+  } finally { await file.close(); }
+}
+
+export async function hydrateInputImages(cacheDirectory, input, currentTurnIndex, signal) {
+  const directory = path.join(cacheDirectory, 'direct-responses', 'attachments');
+  const result = input.slice();
+  let remaining = CONTEXT_IMAGE_LIMIT, omitted = 0, unavailable = 0;
+  // Select newest first, but preserve message, image and tool order in the wire copy.
+  for (let i = currentTurnIndex; i >= 0; i--) {
+    const item = input[i];
+    if (item.role !== 'user' || !Array.isArray(item.content)) continue;
+    const content = item.content.slice();
+    for (let j = content.length - 1; j >= 0; j--) {
+      const part = content[j];
+      if (part.type !== 'workbench_input_image') continue;
       abortCheck(signal);
-      if (!REFERENCE.test(part.attachmentId || '') || !MIME_TYPES.has(part.mimeType)) throw new Error('对话中的图片记录无效，请新建对话后重试。');
-      const file = path.join(cacheDirectory, 'direct-responses', 'attachments', part.attachmentId);
-      let buffer;
-      try {
-        const handle = await fs.open(file, 'r');
-        try {
-          const stat = await handle.stat();
-          if (!stat.isFile() || stat.size > INPUT_IMAGE_LIMIT) throw new Error('invalid image');
-          buffer = await handle.readFile({ signal });
-        } finally { await handle.close(); }
-      } catch { throw new Error('对话中的图片文件无法读取，请重新添加图片或新建对话。'); }
-      const actual = imageType(buffer);
-      if (actual.mimeType !== part.mimeType || `${createHash('sha256').update(buffer).digest('hex')}.${actual.extension}` !== part.attachmentId) throw new Error('对话中的图片文件已发生变化，请重新添加图片。');
-      total += buffer.length;
-      if (total > CONTEXT_IMAGE_LIMIT) throw new Error('对话中的图片总大小超过 40 MiB，请新建对话后继续。');
-      content.push({ type: 'input_image', image_url: `data:${actual.mimeType};base64,${buffer.toString('base64')}` });
+      let bytes;
+      try { if (remaining) bytes = await readCachedImage(directory, part, remaining, signal); }
+      catch {
+        abortCheck(signal);
+        if (i === currentTurnIndex) throw new Error('本次添加的图片无法读取或校验失败，请重新添加图片。');
+        unavailable++;
+        content[j] = { type: 'input_text', text: '[此处历史附件的图片数据不可用，本次未发送。]' };
+        continue;
+      }
+      if (bytes) {
+        remaining -= bytes.length;
+        content[j] = { type: 'input_image', image_url: `data:${part.mimeType};base64,${bytes.toString('base64')}` };
+      } else {
+        if (i === currentTurnIndex) throw new Error('本次图片超过单次请求预算，请分两次发送。');
+        omitted++;
+        remaining = 0; // Keep a contiguous window of the most recent available images.
+        content[j] = { type: 'input_text', text: '[此处有一张较早的图片，本次未发送其像素。]' };
+      }
     }
-    result.push({ ...item, content });
+    result[i] = { ...item, content };
   }
   abortCheck(signal);
-  return result;
+  return { input: result, omitted, unavailable };
 }
 
 export async function saveGeneratedImages(cwd, items, signal) {

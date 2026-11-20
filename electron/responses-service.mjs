@@ -78,11 +78,17 @@ export class ResponsesService {
       const input = [...history, userInput(this._redact(run, prompt), images)];
       run.input = input;
       await this._saveHistory(run, input);
+      const initialLength = input.length;
+      const visual = await hydrateInputImages(this.cacheDirectory, input, history.length, run.controller.signal);
+      if (visual.omitted || visual.unavailable) {
+        const details = [visual.omitted && `${visual.omitted} 张较早的图片未随本轮发送`, visual.unavailable && `${visual.unavailable} 张历史图片无法读取`].filter(Boolean);
+        await this._emit(run, { type: 'imageContext', notice: `${details.join('；')}。如需核对其中的细节，请重新附上对应图片。` });
+      }
       for (let round = 0; round < MAX_ROUNDS; round++) {
         if (run.stopped) break;
         this._assertHistory(input);
         const instructions = `You are the coding assistant inside Claude Workbench. The user works in ${run.cwd}. Reply in the user's language. Use the provided workspace tools when the task requires inspecting or modifying real files. Do not claim to inspect files or execute commands without using a tool. For action requests, inspect the relevant files, carry out the work, verify the outcome, and deliver the result. Continue calling tools while work remains; a progress update is not a completed task. Finish only when the requested work is complete, the user asks to stop, or a concrete blocker or missing user decision prevents progress. State real blockers clearly and never claim to keep working after a final reply. Prefer Read, Glob, and Grep for workspace inspection and Write or Edit for file changes. Workspace reads are already authorized; ${permissionMode === 'acceptEdits' || permissionMode === 'auto' ? 'workspace file edits are also already authorized, so do not ask for the same permission in prose. ' : ''}Tool names match the desktop activity and permission controls. Bash runs PowerShell on Windows and requires the desktop permission decision. ${permissionMode === 'plan' ? 'Planning mode: only inspect and discuss. File modifications and shell commands are unavailable. Return a plan for review.' : 'Respect the permission decisions returned by the desktop. Never work around a declined tool request.'}\n\n${extensions.instructions}`;
-        const body = { model: run.model, instructions: run.imageGeneration ? 'Generate or edit the requested image using the image_generation tool. Use the supplied reference images when present. Return a real bitmap image, not SVG source or a description. Reply in the user\'s language.' : instructions, input: await hydrateInputImages(this.cacheDirectory, input, run.controller.signal), tools: run.imageGeneration ? [{ type: 'image_generation', model: imageModel }] : [...tools.definitions, ...extensions.definitions], parallel_tool_calls: false, stream: true, store: false, include: ['reasoning.encrypted_content'] };
+        const body = { model: run.model, instructions: run.imageGeneration ? 'Generate or edit the requested image using the image_generation tool. Use the supplied reference images when present. Return a real bitmap image, not SVG source or a description. Reply in the user\'s language.' : instructions, input: visual.input.concat(input.slice(initialLength)), tools: run.imageGeneration ? [{ type: 'image_generation', model: imageModel }] : [...tools.definitions, ...extensions.definitions], parallel_tool_calls: false, stream: true, store: false, include: ['reasoning.encrypted_content'] };
         if (run.imageGeneration) {
           body.tool_choice = { type: 'image_generation' };
           if (imageSize !== undefined) body.tools[0].size = imageSize;

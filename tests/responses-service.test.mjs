@@ -653,15 +653,56 @@ test('rejects malformed, mismatched and excessive input images before requesting
   assert.equal(f.requests.length, 0);
 });
 
-test('does not silently drop missing or tampered image references on continuation', async t => {
+test('unavailable historical pixels are identified without blocking chat; a corrupt current attachment is never silently omitted', async t => {
   const f = await fixture(t);
   const first = await f.run({ inputImages: [{ mimeType: 'image/png', dataBase64: imageBase64 }] });
   const directory = path.join(f.directory, 'cache', 'direct-responses', 'attachments');
   const [name] = await fs.readdir(directory);
   await fs.writeFile(path.join(directory, name), 'CORRUPTED');
-  assert.equal((await f.run({ resumeSessionId: first.sessionId })).isError, true);
-  assert.equal(f.requests.length, 1);
-  assert.match(f.events.filter(event => event.type === 'error').at(-1).error, /图片/);
+  assert.equal((await f.run({ resumeSessionId: first.sessionId })).isError, false);
+  assert.equal(f.requests[1].body.input[0].content[1].type, 'input_text');
+  assert.match(f.events.find(event => event.type === 'imageContext').notice, /1 张历史图片无法读取/);
+  assert.equal((await f.run({ resumeSessionId: first.sessionId, inputImages: [{ mimeType: 'image/png', dataBase64: imageBase64 }] })).isError, true);
+  assert.equal(f.requests.length, 2);
+  assert.match(f.events.filter(event => event.type === 'error').at(-1).error, /重新添加图片/);
+});
+
+test('over-budget legacy image history resumes with text and new images without modifying any old references', async t => {
+  const seen = [];
+  const f = await fixture(t, undefined, {fetchImpl: async (_url, request) => {
+    const { input } = JSON.parse(request.body);
+    const turns = input.filter(item => item.role === 'user').map(item => ({
+      text: item.content[0].text,
+      sizes: item.content.filter(part => part.type === 'input_image').map(part => Buffer.byteLength(part.image_url.split(',')[1], 'base64')),
+    }));
+    seen.push(turns);
+    return sse([complete([textItem('Finished.')])]);
+  }});
+  const big = largePngFixture();
+  const image = { mimeType: 'image/png', dataBase64: big.toString('base64') };
+  const first = await f.run({ inputImages: [image] });
+  const file = path.join(f.directory, 'cache', 'direct-responses', `${first.sessionId}.json`);
+  const legacy = JSON.parse(await fs.readFile(file, 'utf8'));
+  const ref = legacy.input[0].content[1];
+  const limit = 40 * 1024 * 1024;
+  const fit = Math.floor(limit / big.length), total = fit + 3;
+  legacy.input = Array.from({ length: total }, (_, i) => ({ role: 'user', content: [{type:'input_text', text:`Screenshot ${i}`}, ref] }));
+  await fs.writeFile(file, JSON.stringify(legacy));
+  for (const [prompt, inputImages] of [['continue', []], ['inspect this again', [image, {mimeType:'image/png', dataBase64:imageBase64}]]]) {
+    const result = await f.run({ resumeSessionId: first.sessionId, prompt, inputImages });
+    assert.equal(result.isError, false);
+    assert.equal(result.sessionId, first.sessionId);
+    const turns = seen.at(-1), current = turns.at(-1);
+    assert.equal(current.text, prompt);
+    assert.deepEqual(current.sizes, inputImages.map(img => Buffer.byteLength(img.dataBase64, 'base64')));
+    const size = current.sizes.reduce((a,b) => a+b, 0);
+    const keep = Math.floor((limit - size) / big.length);
+    assert.deepEqual(turns.slice(0,total).map((turn,i) => [turn.text, turn.sizes]), legacy.input.map((_,i) => [`Screenshot ${i}`, i < total - keep ? [] : [big.length]]));
+    assert.ok(turns.flatMap(turn => turn.sizes).reduce((a,b) => a+b, 0) <= limit);
+    assert.match(f.events.filter(event => event.type === 'imageContext').at(-1).notice, new RegExp(`${total-keep} 张较早`));
+    assert.deepEqual(JSON.parse(await fs.readFile(file,'utf8')).input.slice(0,total), legacy.input);
+  }
+  assert.deepEqual(await fs.readFile(path.join(f.directory,'cache','direct-responses','attachments',ref.attachmentId)),big);
 });
 
 test('image generation rejects descriptions, unfinished images and disguised SVG instead of claiming success', async t => {

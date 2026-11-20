@@ -263,7 +263,17 @@ try {
   await svgMessage.getByRole('link', { name: '打开缺失 SVG 原图', exact: true }).click();
   await svgMessage.getByRole('alert').filter({ hasText: /文件不存在/ }).waitFor();
   await page.screenshot({ path: path.join(outputDirectory, '04-missing-file-error.png') });
-  assert.equal(requests.length, 3);
+  // Remove only the synthetic provider cache entry. The chat thumbnail and original must survive.
+  const binaryCache = path.join(isolated, 'state', 'responses', 'direct-responses', 'attachments');
+  const [cached] = await fs.readdir(binaryCache);
+  await fs.unlink(path.join(binaryCache, cached));
+  await composer.fill('MEDIA_SVG：继续上次对话。');
+  await page.getByRole('button', { name: '发送任务', exact: true }).click();
+  const notice = page.locator('.message-assistant').last().getByRole('note');
+  await expect(notice).toContainText('1 张历史图片无法读取');
+  await expect(page.locator('.message-assistant').last().getByRole('link', { name: '打开 Windows SVG 原图', exact: true })).toBeVisible();
+  await imageLoaded(page.locator('.message-user .chat-attachment-image img').first());
+  assert.equal(requests.length, 4);
   assert.deepEqual(serverErrors, []);
   assert.deepEqual(rendererErrors, []);
   console.log(`Electron media fixture passed: native clipboard, image input, bitmap generation, SVG original actions, safe previews, and visible missing-file errors. Screenshots: ${outputDirectory}`);
